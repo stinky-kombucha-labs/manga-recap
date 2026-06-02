@@ -1,0 +1,50 @@
+{
+  "novel": {
+    "name": "Tales of Demons and Gods",
+    "folder": "tales-of-demons-and-gods-manga",
+    "source_dir": "input/tales-of-demons-and-gods-manga",
+    "total_chapters": 959
+  },
+  "run": {
+    "chapters": "1",
+    "output_dir": "video_output"
+  },
+  "video": {
+    "fps": 24,
+    "page_duration_min": 5,
+    "crf": 18
+  },
+  "detection": {
+    "paddle_fallback": false,
+    "bubble_merge_gap": 36,
+    "paddle_min_confidence": 0.64,
+    "fallback_duplicate_iou": 0.18,
+    "min_block_area": 24,
+    "max_block_area_ratio": 0.20
+  },
+  "render": {
+    "bg_mode": "lama",
+    "fit_mode": "glyph_match",
+    "glyph_match_ratio": 1.15,
+    "detect_extent": false,
+    "justify": false,
+    "line_spacing": 1.35,
+    "stroke_ratio": 0.10,
+    "stroke_width": 7,
+    "font_max": 61,
+    "font_min": 12,
+    "mask_dilation": 48,
+    "kernel_size": 7,
+    "inpainting_size": 2560,
+    "expand_render_bbox": false
+  },
+  "tts": {
+    "enabled": true,
+    "voice": "oleksa",
+    "tts_python": "/home/user/PycharmProjects/tts/.venv/bin/python3"
+  },
+  "translation": {
+    "server_url": "http://127.0.0.1:8080",
+    "timeout": 30
+  }
+}

@@ -1,0 +1,35 @@
+# Large data / models (do NOT commit)
+# input/ = source manga pages (168 GB)
+input/
+# .venv = virtualenv (12 GB, restore from requirements.txt)
+.venv/
+# manga-image-translator = third-party library (clone separately)
+manga-image-translator/
+video_output/
+image_output/
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.ark
+*.npz
+
+# Pipeline working files
+# temp/ holds renders/audio/pages AND translations.json (manga text -> not public)
+temp/
+# private backups of translations (copyrighted work)
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.DS_Store
+*.swp
+
+# Claude Code local
+.claude/
