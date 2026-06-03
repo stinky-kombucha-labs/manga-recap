@@ -39,13 +39,29 @@ Step 2 — render + encode (re-runnable):
 
 ## Requirements
 
-- Python 3.10, CUDA GPU recommended (tested on RTX 5080, torch 2.9.1+cu128).
+- **Python 3.10** — required by the TTS engine
+  ([`ukrainian-tts`](https://github.com/robinhad/ukrainian-tts) does not support
+  newer Python versions), so the whole project pins 3.10.
+- CUDA GPU recommended (tested on RTX 5080).
 - [`manga-image-translator`](https://github.com/zyddnys/manga-image-translator)
   cloned into `./manga-image-translator/` with its detection/OCR/inpainting
   models downloaded into `manga-image-translator/models/`.
 - FFmpeg in `PATH`.
-- A TTS engine for narration (this project used a local `ukrainian-tts` venv;
-  optional — use `--skip-tts` to skip).
+- TTS narration via [`ukrainian-tts`](https://github.com/robinhad/ukrainian-tts)
+  (Oleksa voice). Run it in its **own** venv and point `tts.tts_python` in
+  `config.json` at that interpreter. Optional — use `--skip-tts` to render
+  silent video.
+
+## Troubleshooting
+
+- **`CUDA error: no kernel image is available` / GPU not used.** Newer GPUs need
+  a matching CUDA build of PyTorch. On an RTX 5080 (compute capability sm_120)
+  the stock torch wheels fail; install **torch 2.9.1+cu128** (or newer) in both
+  the main venv and the TTS venv. Older torch builds simply don't include the
+  kernels for recent cards.
+- **NVENC fails at large still-image resolutions** — the encoder uses
+  `libx264` + `framerate=1` for the page slides instead.
+- **PaddleOCR (legacy path) v3+** — use `predict()` not `ocr()`.
 
 ## Setup
 
@@ -56,6 +72,10 @@ python3.10 -m venv .venv
 # vendored library (not included here)
 git clone https://github.com/zyddnys/manga-image-translator
 # then download its models per its README
+
+# TTS in its own Python 3.10 venv (optional, for narration):
+#   https://github.com/robinhad/ukrainian-tts
+# then set tts.tts_python in config.json to that venv's python
 
 # put your manga pages here:
 #   input/<novel-folder>/chapter-00001/*.png
