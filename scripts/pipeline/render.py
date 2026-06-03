@@ -641,7 +641,10 @@ def _plan_blocks(image: Image.Image, blocks: list[dict], cfg: dict) -> list[dict
     """
     glyph_match = str(cfg.get("fit_mode", "glyph_match")).lower() == "glyph_match"
     ratio = float(cfg.get("glyph_match_ratio", 1.0))
+    glyph_min_px = float(cfg.get("glyph_min_px", 0))   # minimum readable glyph height (px)
+    line_spacing = float(cfg.get("line_spacing", 1.35))
     gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    H, W = gray.shape[:2]
     planned = []
     for block in blocks:
         nb = dict(block)
@@ -655,13 +658,31 @@ def _plan_blocks(image: Image.Image, blocks: list[dict], cfg: dict) -> list[dict
         ys1 = [b[1] for b in all_lines] + [block["bbox"][1]]
         xs2 = [b[2] for b in all_lines] + [block["bbox"][2]]
         ys2 = [b[3] for b in all_lines] + [block["bbox"][3]]
-        nb["_extent"] = [min(xs1), min(ys1), max(xs2), max(ys2)]
+        extent = [min(xs1), min(ys1), max(xs2), max(ys2)]
         nb["_eng_h"] = eng_h
         if glyph_match and eng_h > 0:
-            fs = _font_for_glyph_height(eng_h * ratio)
+            # Cap to the English size, but never below glyph_min_px so short
+            # captions stay readable instead of matching tiny original lettering.
+            target_px = max(eng_h * ratio, glyph_min_px)
+            fs = _font_for_glyph_height(target_px)
             nb["_font_max"] = max(int(cfg.get("font_min", 14)), fs)
+            # Give a too-thin caption bbox enough vertical room for the floor font
+            # (one line), expanding centered and clamped — bounded so we never
+            # balloon a bubble. Helps free captions like "Зорепад; ніч згасала".
+            if glyph_min_px > 0:
+                need_h = int(target_px * line_spacing * 1.5)
+                x1, y1, x2, y2 = extent
+                cur_h = y2 - y1
+                max_h = max(need_h, int(cur_h * 2.4))
+                if cur_h < need_h:
+                    grow = min(need_h, max_h) - cur_h
+                    cy = (y1 + y2) // 2
+                    y1 = max(0, cy - (cur_h + grow) // 2)
+                    y2 = min(H, cy + (cur_h + grow) // 2)
+                    extent = [x1, y1, x2, y2]
         else:
             nb["_font_max"] = int(cfg.get("font_max", 61))
+        nb["_extent"] = extent
         planned.append(nb)
     return planned
 

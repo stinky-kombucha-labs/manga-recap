@@ -26,6 +26,7 @@
     "bg_mode": "lama",
     "fit_mode": "glyph_match",
     "glyph_match_ratio": 1.15,
+    "glyph_min_px": 40,
     "detect_extent": false,
     "justify": false,
     "line_spacing": 1.35,
