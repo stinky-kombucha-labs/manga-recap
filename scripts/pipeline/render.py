@@ -23,7 +23,11 @@ from manga_translator.config import Config
 from manga_translator.manga_translator import MangaTranslator
 from manga_translator.utils import Quadrilateral, TextBlock
 
-ANIME_ACE = _MIT_ROOT / "fonts" / "anime_ace_3.ttf"
+# Primary display font. Pangolin (Google Fonts, OFL) has full, correct Ukrainian
+# (І Ї Є Ґ), unlike Anime Ace which rendered them as "№". The Noto fallback below
+# is kept as a safety net but no longer triggers for Pangolin's covered glyphs.
+ANIME_ACE = _MIT_ROOT.parent / "fonts" / "Caveat.ttf"
+_FONT_WEIGHT = 700   # applied to variable fonts (e.g. Caveat); no-op for static fonts
 NOTO_BOLD = Path("/usr/share/fonts/google-noto/NotoSans-Bold.ttf")
 USE_GPU = bool(torch.cuda.is_available() or torch.backends.mps.is_available())
 
@@ -35,9 +39,13 @@ _PROBE = ImageDraw.Draw(Image.new("RGB", (8, 8)))
 # ---------------------------------------------------------------------------
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    if ANIME_ACE.exists():
-        return ImageFont.truetype(str(ANIME_ACE), size)
-    return ImageFont.truetype(str(NOTO_BOLD), size)
+    path = ANIME_ACE if ANIME_ACE.exists() else NOTO_BOLD
+    f = ImageFont.truetype(str(path), size)
+    try:                          # set a heavier weight on variable fonts
+        f.set_variation_by_axes([_FONT_WEIGHT])
+    except Exception:
+        pass
+    return f
 
 
 def _cap_ratio() -> float:
@@ -65,8 +73,7 @@ def _font_for_glyph_height(px: float) -> int:
 # hardcode a list, detect missing glyphs by comparing each char's bitmap to the
 # font's .notdef bitmap, and draw those from a Cyrillic-complete fallback (Noto).
 _fallback_cache: dict[int, ImageFont.FreeTypeFont] = {}
-_notdef_cache: dict[int, bytes] = {}
-_missing_cache: dict[tuple[str, int], bool] = {}
+_primary_cmap: set[int] | None = None
 
 
 def _load_fallback(size: int) -> ImageFont.FreeTypeFont:
@@ -86,16 +93,26 @@ def _notdef_bytes(primary: ImageFont.FreeTypeFont) -> bytes:
     return _notdef_cache[size]
 
 
-def _is_missing(ch: str, primary: ImageFont.FreeTypeFont) -> bool:
+def _load_primary_cmap() -> set:
+    """Real character map of the primary font (via fontTools) — reliable for
+    static AND variable fonts. The old bitmap-vs-.notdef heuristic mis-flagged
+    whole alphabets in variable fonts and rendered everything in the fallback."""
+    global _primary_cmap
+    if _primary_cmap is None:
+        try:
+            from fontTools.ttLib import TTFont
+            tt = TTFont(str(ANIME_ACE if ANIME_ACE.exists() else NOTO_BOLD))
+            _primary_cmap = set(tt.getBestCmap().keys())
+        except Exception:
+            _primary_cmap = set()
+    return _primary_cmap
+
+
+def _is_missing(ch: str, primary=None) -> bool:
     if not ch.strip():
         return False
-    key = (ch, int(primary.size))
-    if key not in _missing_cache:
-        try:
-            _missing_cache[key] = primary.getmask(ch).tobytes() == _notdef_bytes(primary)
-        except Exception:
-            _missing_cache[key] = True
-    return _missing_cache[key]
+    cm = _load_primary_cmap()
+    return bool(cm) and ord(ch) not in cm
 
 
 def _font_for_char(ch: str, primary: ImageFont.FreeTypeFont,
