@@ -6,7 +6,7 @@ Uses manga-image-translator's own detector (DBConvNeXt — trained on manga) + 4
 which finds actual speech bubbles and ignores page numbers/noise that PaddleOCR picks up.
 
 After running, open translations.json, fill in "translation" for each block,
-then run step2_render.py to produce the final video.
+then run step2_translate.py (Lapa LLM) and step3_render.py to produce the final video.
 
 Run:
     .venv/bin/python scripts/step1_extract.py
@@ -29,6 +29,7 @@ from PIL import Image
 from pipeline.chapters import chapter_numbers
 from pipeline.bubbles import merge_into_bubbles
 from pipeline.detect import detect_page_blocks
+from pipeline import jsonfmt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIT_ROOT = PROJECT_ROOT / "manga-image-translator"
@@ -163,7 +164,14 @@ def _is_noise_text(text: str) -> bool:
     if not text:
         return True
     tl = text.lower()
-    if any(w in tl for w in (".net", ".com", ".org", "reader", "scans", "webtoon")):
+    # Scanlation site addresses / reader links.
+    if any(w in tl for w in (".net", ".com", ".org", "http", "www.", "reader", "scans", "webtoon")):
+        return True
+    # Scanlation credit lines (translator/editor/cleaner/typesetter/etc.) — not story
+    # text, never narrated, so drop them before they reach translations.json.
+    if any(w in tl for w in ("translator", "translation:", "redraw", "redrawer", "cleaner",
+                             "typesetter", "proofread", "scanlat", "uploader", "raws",
+                             "edited by", "edit:", "credits")):
         return True
     cjk = sum(1 for c in text if unicodedata.east_asian_width(c) in ("W", "F"))
     if cjk and cjk / max(1, len(text)) > 0.5:
@@ -283,6 +291,123 @@ def _merge_paddle_fallback(
     return _sort_blocks(merged)
 
 
+def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detection_cfg: dict) -> list[dict]:
+    """Fill blocks the CTD detector found but ocr48px could not read.
+
+    ocr48px silently drops stylized/textured English captions (e.g. the yellow
+    "I SHOULD BE SURROUNDED BY THE SAGE EMPEROR..." narration boxes), leaving the
+    region detected but with empty text. Those used to be filled in by hand; now
+    that translation is automatic (Lapa only sees `original`), an empty original
+    means the caption is never translated. PaddleOCR handles these outlined
+    captions, so we re-OCR just the empty boxes with it.
+
+    Only runs when there ARE empty boxes, so clean pages pay no Paddle cost.
+    """
+    if not detection_cfg.get("recover_empty_ocr", True):
+        return blocks
+    empties = [b for b in blocks if not (b.get("text") or "").strip()]
+    if not empties:
+        return blocks
+    non_empty = [b for b in blocks if (b.get("text") or "").strip()]
+
+    try:
+        from pipeline.ocr import _get_paddle_ocr
+        ocr = _get_paddle_ocr()
+        page = Image.open(image_path).convert("RGB")
+    except Exception as exc:
+        print(f"\n    OCR-recovery unavailable: {exc}", end=" ")
+        return blocks
+
+    page_w, page_h = page.size
+    min_conf = float(detection_cfg.get("recover_min_confidence", 0.5))
+
+    def _center_in(box, cx, cy):
+        return box[0] <= cx <= box[2] and box[1] <= cy <= box[3]
+
+    # Re-OCR each empty box individually on a padded CROP, not the whole page.
+    # Whole-page PaddleOCR mis-localizes these captions, and CTD's boxes are often
+    # too tight (they clip the text), so we pad generously, read the crop, offset
+    # the line boxes back to page coords, and GROW the block to fit — that way the
+    # inpaint mask covers the full English and Lapa gets the complete sentence.
+    recovered = 0
+    for block in empties:
+        x1, y1, x2, y2 = block["bbox"]
+        pad_x = max(30, int((x2 - x1) * 0.10))
+        pad_y = max(60, int((y2 - y1) * 0.6))
+        cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+        cx2, cy2 = min(page_w, x2 + pad_x), min(page_h, y2 + pad_y)
+        try:
+            result = ocr.predict(np.array(page.crop((cx1, cy1, cx2, cy2))))
+        except Exception:
+            continue
+        if not result:
+            continue
+        res = result[0]
+
+        def _as_list(v):
+            # rec_* may be a numpy array, where `v or []` raises "ambiguous truth value".
+            try:
+                return list(v) if v is not None and len(v) else []
+            except TypeError:
+                return []
+
+        texts = _as_list(res.get("rec_texts"))
+        scores = _as_list(res.get("rec_scores"))
+        polys = _as_list(res.get("rec_polys")) or _as_list(res.get("rec_boxes"))
+
+        found: list[tuple[list[int], str, float, float]] = []
+        for text, conf, poly in zip(texts, scores, polys):
+            if float(conf) < min_conf or not str(text).strip():
+                continue
+            arr = np.array(poly)
+            if arr.ndim == 2:
+                xs = [p[0] for p in arr.tolist()]
+                ys = [p[1] for p in arr.tolist()]
+                bb = [int(min(xs)) + cx1, int(min(ys)) + cy1,
+                      int(max(xs)) + cx1, int(max(ys)) + cy1]
+            else:
+                a = arr.flatten()[:4]
+                bb = [int(min(a[0], a[2])) + cx1, int(min(a[1], a[3])) + cy1,
+                      int(max(a[0], a[2])) + cx1, int(max(a[1], a[3])) + cy1]
+            mcx, mcy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+            # Skip text that belongs to a bubble ocr48px already read.
+            if any(_center_in(nb["bbox"], mcx, mcy) for nb in non_empty):
+                continue
+            found.append((bb, str(text).strip(), mcx, mcy))
+
+        if not found:
+            continue
+        # Reading order: cluster lines into rows by y (a wrapping caption's words must
+        # not interleave), then left-to-right within each row. Plain (y, x) sort scrambles
+        # word order when line boxes overlap vertically.
+        found.sort(key=lambda it: it[3])
+        row_tol = float(np.median([it[0][3] - it[0][1] for it in found])) * 0.7
+        rows = [[found[0]]]
+        for it in found[1:]:
+            if it[3] - rows[-1][-1][3] > row_tol:
+                rows.append([it])
+            else:
+                rows[-1].append(it)
+        for row in rows:
+            row.sort(key=lambda it: it[2])
+        found = [it for row in rows for it in row]
+        recovered_text = " ".join(it[1] for it in found)
+        if _is_noise_text(recovered_text):           # recovered a credit line / URL — skip
+            continue
+        boxes = [it[0] for it in found]
+        block["text"] = recovered_text
+        block["source"] = "ctd-paddle"   # mark: recovered from a stylized caption →
+                                          # OCR-error-prone, worth an image check (flag `verify`)
+        block["line_bboxes"] = boxes
+        block["bbox"] = [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                         max(b[2] for b in boxes), max(b[3] for b in boxes)]
+        recovered += 1
+
+    if recovered:
+        print(f"+{recovered} ocr-recover", end=" ")
+    return blocks
+
+
 async def _detect_page(image_path: Path, detection_cfg: dict | None = None) -> list[dict]:
     """
     Run CTD detection + 48px OCR on one page (via pipeline.detect), union regions
@@ -311,6 +436,10 @@ async def _detect_page(image_path: Path, detection_cfg: dict | None = None) -> l
     # Union regions belonging to the same speech bubble -> one bubble per block.
     gap = int(detection_cfg.get("bubble_merge_gap", 36))
     blocks = merge_into_bubbles(blocks, gap=gap)
+
+    # Re-OCR boxes ocr48px left empty (stylized captions) with PaddleOCR so they
+    # carry text into translation instead of staying blank.
+    blocks = _recover_empty_text_with_paddle(image_path, blocks, detection_cfg)
 
     # Optional PaddleOCR fill (off by default; CTD already covers full bubbles).
     if detection_cfg.get("paddle_fallback", False):
@@ -465,11 +594,11 @@ def extract_chapter(chapter_num: int, cfg: dict) -> Path:
         for bid, b in enumerate(blocks_raw):
             blocks_out.append({
                 "id": bid,
-                "bbox": b["bbox"],
-                "line_bboxes": b["line_bboxes"],
                 "original": b["text"],
                 "translation": _match_existing_translation(b, prev, used_prev),
                 "detector": b.get("source", "mit"),
+                "bbox": b["bbox"],
+                "line_bboxes": b["line_bboxes"],
             })
 
         result_pages.append({
@@ -483,9 +612,9 @@ def extract_chapter(chapter_num: int, cfg: dict) -> Path:
         "chapter": chapter_num,
         "pages": result_pages,
     }
-    out_json.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    jsonfmt.write(out_json, data)
     print(f"\nSaved: {out_json}")
-    print("Fill in 'translation' fields, then run step2_render.py")
+    print("Next: run step2_translate.py to fill 'translation' with Lapa LLM, then step3_render.py")
     return out_json
 
 

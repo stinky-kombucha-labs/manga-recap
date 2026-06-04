@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Translate manga chapters (Tales of Demons and Gods, 959 chapters) from English to Ukrainian, then produce per-chapter 4K portrait YouTube MP4s with Oleksa TTS narration.
 
-**STATUS — user-approved 2026-06-02:** chapter 1 rendered clean via the two-step flow below (CTD detect → fill translations → LaMa render + font fallback + Oleksa TTS → 4K MP4). This is the standard workflow going forward; apply it to subsequent chapters.
+**STATUS — user-approved 2026-06-02:** chapter 1 rendered clean (CTD detect → LaMa render + font fallback + Oleksa TTS → 4K MP4). As of 2026-06-03 translation is a dedicated step done locally by **Lapa LLM** (step 2), replacing the earlier by-hand/Claude translation. Standard flow is now three steps (detect → translate → render); apply it to subsequent chapters.
 
 **Confirmed best rendering approach (TOP — use this):** LaMa neural inpainting removes English text, Anime Ace font with white stroke renders Ukrainian directly on the clean background — no white fill patches. LaMa is the chosen background; `blur` exists only as a fallback variant.
 
@@ -14,19 +14,39 @@ Translate manga chapters (Tales of Demons and Gods, 959 chapters) from English t
 
 **Text fit rules (in `pipeline/render.py`):** Ukrainian is sized to the measured English glyph height (`fit_mode: "glyph_match"`, never bigger than the English), fits both width (incl. stroke) and height, lines are **centered** (`justify: false` — word-justify made ugly gaps in narrow bubbles), `line_spacing ≈ 1.35`.
 
-## Two-step workflow
+## Three-step workflow
 
 ```
-Step 1 — OCR + fill translations (once per chapter):
+Step 1 — OCR + detect bubbles (once per chapter):
   .venv/bin/python scripts/step1_extract.py
 
   → creates temp/{novel}/chapter-XXXXX/translations.json
-  → edit "translation" fields manually or provide to Claude for translation
-  → translations persist across re-runs (manual edits are preserved)
+  → "translation" fields are left empty for step 2 to fill
+  → existing translations persist across re-runs
 
-Step 2 — Render + encode (re-runnable):
-  .venv/bin/python scripts/step2_render.py
-  .venv/bin/python scripts/step2_render.py --skip-tts
+Step 2 — Translate EN→UK with local Lapa LLM (re-runnable):
+  .venv/bin/python scripts/step2_translate.py
+  .venv/bin/python scripts/step2_translate.py --overwrite
+
+  → reads translations.json, fills every empty "translation" via Lapa GGUF
+  → runs the model in the Lapa venv as a subprocess (config.json → translation)
+  → only fills EMPTY fields by default, so manual edits survive re-runs
+
+Step 2b — Flag + locally repair + emit Claude review list (re-runnable):
+  .venv/bin/python scripts/step2b_repair.py
+  .venv/bin/python scripts/step2b_repair.py --no-repair
+
+  → flags only suspicious blocks (pipeline/flag.py: latin/explanation/length/empty/mixed)
+  → re-translates flagged blocks via Lapa with a CORRECTIVE prompt (local, free)
+  → writes review_todo.json — the small list Claude reviews (see REVIEW.md)
+  → keeps the Claude pass at ~1-3 blocks/chapter instead of all ~70 (scales to 959)
+
+Step 2c (optional) — Claude reviews ONLY review_todo.json and edits translations.json
+  (run Claude per REVIEW.md; skip if blocks_to_review is empty)
+
+Step 3 — Render + encode (re-runnable):
+  .venv/bin/python scripts/step3_render.py
+  .venv/bin/python scripts/step3_render.py --skip-tts
 
   → reads translations.json
   → LaMa inpaint + stroke text per page
@@ -35,9 +55,28 @@ Step 2 — Render + encode (re-runnable):
   → output: video_output/{novel}/chapter-XXXXX.mp4
 ```
 
+**Translation (step 2) — Lapa LLM.** Translation is done locally by the
+[Lapa LLM](https://huggingface.co/lapa-llm) `lapa-v0.1.2-instruct` GGUF (Gemma-3
+12B, best EN↔UK quality). It runs in the **separate Lapa project's venv**
+(`/home/user/PycharmProjects/PythonProject_Lapa_LLM/.venv`, which already has
+`llama-cpp-python` + the GGUF models) — the main venv never imports `llama_cpp`,
+the same isolation pattern as TTS. `pipeline/lapa_worker.py` loads the model once
+and translates each block with the **shortest possible prompt**
+(`"Переклади українською:\n\n<text>"`). Lapa degrades if you stuff the system
+prompt with instructions/glossaries, so keep it minimal. (Earlier chapters were
+translated by hand/Claude; this step replaces that with the local model.)
+
 ## translations.json format
 
-Located at `temp/{novel}/{chapter}/translations.json`. Edit the `"translation"` field for each block. Leave empty `""` to skip rendering text on that block (original text stays as-is after inpainting).
+Located at `temp/{novel}/{chapter}/translations.json`. Each block's `"translation"`
+is what gets rendered. Step 2 fills it from the English `"original"`; you can then
+hand-edit it. Leave empty `""` to skip rendering text on that block (original text
+stays as-is after inpainting).
+
+The file is written by `pipeline/jsonfmt.py` to stay **easy to hand-edit**: each
+block lists `id → original → translation` first (the fields you actually read and
+edit), with the geometry (`detector`, `bbox`, `line_bboxes`) tucked at the end and
+the coordinate arrays collapsed onto one line each. It's still plain JSON.
 
 ```json
 {
@@ -50,10 +89,11 @@ Located at `temp/{novel}/{chapter}/translations.json`. Edit the `"translation"` 
       "blocks": [
         {
           "id": 0,
-          "bbox": [x1, y1, x2, y2],
-          "line_bboxes": [[x1,y1,x2,y2], ...],
           "original": "OCR text (English)",
-          "translation": "Ukrainian translation ← edit this"
+          "translation": "Ukrainian translation ← step 2 fills / you edit",
+          "detector": "ctd",
+          "bbox": [x1, y1, x2, y2],
+          "line_bboxes": [[x1, y1, x2, y2]]
         }
       ]
     }
@@ -73,7 +113,7 @@ temp/
   tales-of-demons-and-gods-manga/   ← working files per chapter (auto-created)
     chapter-00001/
       pages/          ← copied source pages
-      translations.json  ← edit this
+      translations.json  ← step 2 fills, you review/edit
       rendered/       ← LaMa + text output
       audio/          ← Oleksa WAV per page
 video_output/
@@ -88,6 +128,13 @@ video_output/
 | `novel.source_dir` | Relative path from project root: `input/tales-of-demons-and-gods-manga` |
 | `novel.total_chapters` | Total chapters (959) |
 | `run.chapters` | Chapters to process: `"1"`, `"1-5"`, `"1,3,7-9"`, `"all"` |
+| `detection.recover_empty_ocr` | `true` = re-OCR CTD boxes that ocr48px left blank with PaddleOCR (recovers stylized captions). Runs only when blank boxes exist |
+| `detection.recover_min_confidence` | PaddleOCR min confidence for recovery (0.5) |
+| `translation.lapa_python` | Lapa venv python (has `llama_cpp`): `/home/user/PycharmProjects/PythonProject_Lapa_LLM/.venv/bin/python` |
+| `translation.model_path` | Lapa GGUF. `-Q8_0` (≈12 GB, higher quality, **current**) needs `n_ctx ≤ 2048` on a 16 GB card; `-Q4_K_M` (≈6.8 GB) runs fine at 4096 |
+| `translation.n_ctx` / `n_gpu_layers` / `flash_attn` | llama.cpp load options. On 16 GB RTX 5080: Q8_0 peaks ~15.5 GB at n_ctx=2048 (fits, thin headroom); Q8_0 at 4096 OOMs (`Failed to create llama_context`). Manga bubbles are short, so 2048 is plenty |
+| `translation.temperature/top_p/top_k/repeat_penalty` | Sampler (0.1 / 0.9 / 25 / 1.0 — low temp for faithful translation) |
+| `translation.overwrite` | `true` = re-translate even non-empty fields (default false) |
 | `tts.tts_python` | `/home/user/PycharmProjects/tts/.venv/bin/python3` |
 | `video.page_duration_min` | Minimum seconds per page (default 5) |
 | `render.font_max/font_min` | Font size search range (61/21) |
@@ -95,12 +142,18 @@ video_output/
 
 ## Pipeline modules
 
-- **`pipeline/detect.py`** — CONFIRMED detection: CTD (`Detector.ctd`) + `ocr48px` + textline merge via MIT **dispatch functions directly** (the MangaTranslator wrapper class dropped most regions). Recovers OCR-dropped free-caption lines from the pre-OCR detection boxes. `step1_extract.py` uses this; `pipeline/bubbles.py::merge_into_bubbles` then unions split regions into one bubble.
+- **`pipeline/detect.py`** — CONFIRMED detection: CTD (`Detector.ctd`) + `ocr48px` + textline merge via MIT **dispatch functions directly** (the MangaTranslator wrapper class dropped most regions). Recovers OCR-dropped free-caption lines from the pre-OCR detection boxes. `step1_extract.py` uses this; `pipeline/bubbles.py::merge_into_bubbles` then unions split regions into one bubble. **ocr48px silently drops stylized/textured English captions** (e.g. the yellow "I SHOULD BE SURROUNDED BY THE SAGE EMPEROR…" narration) — the box is detected but its text is empty. `step1_extract.py::_recover_empty_text_with_paddle` re-OCRs only those empty boxes with PaddleOCR (which reads outlined captions) so they carry text into step 2. Without this the caption stays blank and Lapa has nothing to translate (this was the "page 6 not translated" regression after translation became automatic). **It crops each empty box with generous padding and OCRs the crop** (whole-page PaddleOCR mis-localizes these, and CTD boxes are often too tight and clip the text), then offsets the line boxes back and **grows the block bbox to the recovered text** so the inpaint mask covers the full English (this was the "page 2 PEOPLE LIVING… left in English" bug — a wrapping caption split into two tight boxes). Limit: heavy graffiti chapter titles ("CHAPTER 1 - REBIRTH") defeat both ocr48px AND PaddleOCR (Paddle reads only "HE"@0.37) — those stay blank and must be hand-filled if you want them translated.
 - **`pipeline/ocr.py`** — legacy PaddleOCR path (kept as optional `detection.paddle_fallback`, default off). Fragments/misses bubbles — superseded by `pipeline/detect.py`.
+- **`pipeline/translate.py`** — step 2 orchestrator helper. Collects blocks needing translation, calls `pipeline/lapa_worker.py` as a subprocess in the Lapa venv (config `translation.lapa_python`), returns `{key: ukrainian}`. Main venv never imports `llama_cpp`.
+- **`pipeline/lapa_worker.py`** — runs INSIDE the Lapa venv. Loads the GGUF once, translates each block with the minimal prompt `"Переклади українською:\n\n<text>"`, strips stray labels, writes a result JSON. Same subprocess-worker pattern as TTS.
+- **`pipeline/flag.py`** — deterministic (no-LLM) problem detector. `flag_block` returns reasons a translation is suspicious (`latin`/`explanation`/`length`/`empty`/`mixed`). Patterns ported from the sister Lapa project. Used by `step2b_repair.py` to keep the Claude review tiny — only flagged blocks are touched, so cost scales to 959 chapters without quality loss. Tunable via config `flag` (defaults in the module).
+- **`pipeline/jsonfmt.py`** — readable serializer for translations.json (block order `id→original→translation→detector→bbox→line_bboxes`, coordinate arrays collapsed to one line). Used by step 1 and step 2.
 - **`pipeline/render.py`** — background clean (`bg_mode`: `lama` default / `blur` fallback) + Anime Ace stroke text. Glyph-match fit (`english_glyph_height` → font capped to English size), width+height fit incl. stroke, centered lines (`justify` default false), optional `detect_extent` to catch OCR-missed continuation lines. `render_page` plans each block (`_plan_blocks`) then cleans + renders.
 - **`scripts/demo_detect_translate_render.py`** — all-in-one reference: CTD detect → OCR → translate → `merge_into_bubbles` → clean all lines → glyph-match render → `image_output/`. This is the confirmed code shape to fold into step1/step2.
 - **`pipeline/tts.py`** — Calls `tts_worker.py` via subprocess with `cwd=/home/user/PycharmProjects/tts/` (model files are relative). Uses Oleksa voice.
 - **`pipeline/encode.py`** — `framerate=1` still-image segments + FFmpeg concat → 4K portrait MP4.
+
+**Caches (both in the chapter's `temp/` dir):** `rendered/.render_cache.json` keys each page render by a signature of its blocks+source+render cfg; `audio/.audio_cache.json` keys each page's TTS by a SHA of its narration text. Both mean step 3 only redoes work whose input changed — edit a translation and just that page re-renders AND its audio regenerates. (Before the audio cache, TTS only checked file-exists, so edited/re-translated pages kept stale narration.)
 
 ## 4K output format
 

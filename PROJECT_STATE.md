@@ -282,8 +282,12 @@ scripts/
     tts.py          subprocess → tts project venv → Oleksa WAV
     tts_worker.py   worker script called by tts.py
     encode.py       FFmpeg: page segments → chapter MP4
-  step1_extract.py  OCR → translations.json
-  step2_render.py   LaMa + text + TTS + encode
+    translate.py    subprocess → Lapa LLM venv → fills translations.json
+    lapa_worker.py  worker script (runs in Lapa venv) called by translate.py
+    jsonfmt.py      readable translations.json serializer
+  step1_extract.py    OCR → translations.json
+  step2_translate.py  Lapa LLM EN→UK → fills translations.json
+  step3_render.py     LaMa + text + TTS + encode
 
 config.json         novel + run + render + tts + translation settings
 ```
@@ -312,9 +316,10 @@ TTS runs in `/home/user/PycharmProjects/tts/.venv` (also torch 2.9.1+cu128).
 Dragoman removed from this project (VRAM conflicts with LaMa, complex deps).
 Translation is now manual: step1 extracts OCR text → translations.json → user/Claude fills in `"translation"` fields.
 
-New two-step pipeline:
+New three-step pipeline:
 - `scripts/step1_extract.py` — OCR → `temp/{novel}/{chapter}/translations.json`
-- `scripts/step2_render.py` — reads translations.json → LaMa + TTS → 4K MP4
+- `scripts/step2_translate.py` — local Lapa LLM EN→UK → fills translations.json
+- `scripts/step3_render.py` — reads translations.json → LaMa + TTS → 4K MP4
 
 ### Chapter 1 result — 2026-06-02 (v2, 4K)
 - Output: `video_output/tales-of-demons-and-gods-manga/chapter-00001.mp4`
@@ -449,7 +454,7 @@ Clean results: `image_output/page02_lama.png`, `page02_blur.png`,
 
 ## 2026-06-02 APPROVED — standard workflow
 
-User reviewed the chapter-1 result and approved it ("виглядає топ"). The CTD +
+User reviewed the chapter-1 result and approved it ("looks great"). The CTD +
 glyph-match + LaMa + font-fallback two-step flow below is the standard approach
 for all remaining chapters. Details follow.
 
@@ -470,5 +475,6 @@ of chapter 1 succeeded (step1 → fill translations → step2 → 4K MP4 with TT
   box. `render.py` now auto-detects missing glyphs (bitmap equals the .notdef
   bitmap) and draws them per-character from NotoSans-Bold; everything else stays
   Anime Ace. The old Latin transliteration (Ï→"П") was removed.
-- Workflow confirmed: `step1_extract.py` → edit `translation` fields in
-  `translations.json` → `step2_render.py`. Both run from config `run.chapters`.
+- Workflow confirmed: `step1_extract.py` → `step2_translate.py` (Lapa LLM) →
+  review/edit `translation` fields in `translations.json` → `step3_render.py`.
+  All run from config `run.chapters`.

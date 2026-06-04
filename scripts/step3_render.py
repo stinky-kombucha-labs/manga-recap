@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Step 2 — Read translations.json, render pages (LaMa + stroke text), TTS, encode 4K YouTube MP4.
+Step 3 — Read translations.json, render pages (LaMa + stroke text), TTS, encode 4K YouTube MP4.
 
-Run after editing translations.json from step1_extract.py:
-    .venv/bin/python scripts/step2_render.py
-    .venv/bin/python scripts/step2_render.py --skip-tts
+Run after step2_translate.py has filled (and you have reviewed) the Ukrainian
+translations:
+    .venv/bin/python scripts/step3_render.py
+    .venv/bin/python scripts/step3_render.py --skip-tts
 """
 
 from __future__ import annotations
@@ -166,18 +167,34 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
 
     # --- Batch TTS (one subprocess for all pages — model loads once) ---
     if tts_enabled:
+        # Cache narration by text hash so audio is regenerated when a translation
+        # changes (file-exists alone left stale narration after edits / re-translate).
+        audio_cache_path = audio_dir / ".audio_cache.json"
+        audio_cache = _load_json(audio_cache_path, {})
+
         page_texts = {}
         for page in pages:
             idx = page["page_num"]
             audio_path = audio_dir / f"{idx:04d}.wav"
-            if audio_path.exists():
-                continue
             narration = " ".join(
                 b["translation"].strip() for b in page["blocks"]
                 if b.get("translation", "").strip()
             )
-            if narration:
-                page_texts[idx] = narration
+            cache_key = str(idx)
+            sig = hashlib.sha256(narration.encode("utf-8")).hexdigest() if narration else ""
+
+            if not narration:
+                # Translation cleared — drop any stale audio so it won't be reused.
+                if audio_path.exists():
+                    audio_path.unlink()
+                audio_cache.pop(cache_key, None)
+                continue
+            if audio_path.exists() and audio_cache.get(cache_key) == sig:
+                continue
+            page_texts[idx] = narration
+            audio_cache[cache_key] = sig
+
+        _write_json(audio_cache_path, audio_cache)
 
         if page_texts:
             # Free GPU memory held by LaMa before loading TTS model

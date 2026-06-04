@@ -14,17 +14,29 @@ each bubble with auto-fit, manga-style stroke text.
 Step 1 — detect text + extract (once per chapter):
     .venv/bin/python scripts/step1_extract.py
     → CTD detector + 48px OCR + bubble merge
-    → writes temp/<novel>/<chapter>/translations.json
+    → writes temp/<novel>/<chapter>/translations.json (empty translations)
 
-Edit translations.json — fill the "translation" field of each block.
+Step 2 — translate EN→UK with a local LLM (re-runnable):
+    .venv/bin/python scripts/step2_translate.py
+    → fills each empty "translation" field via a local GGUF model
+    → only fills empty fields, so manual edits survive re-runs
 
-Step 2 — render + encode (re-runnable):
-    .venv/bin/python scripts/step2_render.py
-    .venv/bin/python scripts/step2_render.py --skip-tts
+Review / edit the "translation" field of each block in translations.json.
+
+Step 3 — render + encode (re-runnable):
+    .venv/bin/python scripts/step3_render.py
+    .venv/bin/python scripts/step3_render.py --skip-tts
     → LaMa inpaint + stroke text per page
     → TTS narration per page (optional)
     → 4K portrait MP4 in video_output/
 ```
+
+Translation (step 2) runs a local [Lapa LLM](https://huggingface.co/lapa-llm)
+GGUF (Ukrainian-tuned Gemma-3 12B) via `llama-cpp-python` in its own venv — the
+main venv never loads it, the same isolation as TTS. Point `translation.lapa_python`
+and `translation.model_path` in `config.json` at that venv and a `.gguf` file. The
+prompt is deliberately minimal (`"Переклади українською: …"`) — Lapa degrades with
+long instruction-heavy system prompts.
 
 ## Key features
 

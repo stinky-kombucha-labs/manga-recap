@@ -16,6 +16,8 @@
   },
   "detection": {
     "paddle_fallback": false,
+    "recover_empty_ocr": true,
+    "recover_min_confidence": 0.5,
     "bubble_merge_gap": 36,
     "paddle_min_confidence": 0.64,
     "fallback_duplicate_iou": 0.18,
@@ -45,7 +47,15 @@
     "tts_python": "/home/user/PycharmProjects/tts/.venv/bin/python3"
   },
   "translation": {
-    "server_url": "http://127.0.0.1:8080",
-    "timeout": 30
+    "lapa_python": "/home/user/PycharmProjects/PythonProject_Lapa_LLM/.venv/bin/python",
+    "model_path": "/home/user/PycharmProjects/PythonProject_Lapa_LLM/models/lapa-v0.1.2-instruct-Q8_0.gguf",
+    "n_gpu_layers": -1,
+    "n_ctx": 2048,
+    "flash_attn": true,
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "top_k": 25,
+    "repeat_penalty": 1.0,
+    "overwrite": false
   }
 }
