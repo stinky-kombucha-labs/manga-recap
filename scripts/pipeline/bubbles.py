@@ -52,12 +52,15 @@ def merge_into_bubbles(blocks: list[dict], gap: int = 36) -> list[dict]:
         xs2 = [b["bbox"][2] for b in g]
         ys2 = [b["bbox"][3] for b in g]
         line_bboxes = [lb for b in g for lb in (b.get("line_bboxes") or [b["bbox"]])]
-        text = " ".join((b.get("text") or b.get("original") or "").strip()
-                        for b in g).strip()
+        texts = [(b.get("text") or b.get("original") or "").strip() for b in g]
+        # ocr_gaps: component boxes whose OCR came back empty. The caller re-OCRs
+        # such bubbles with PaddleOCR — a partially read caption translates into
+        # nonsense, so it must be recovered whole, not just when fully empty.
         merged.append({
             "bbox": [min(xs1), min(ys1), max(xs2), max(ys2)],
             "line_bboxes": line_bboxes,
-            "text": text,
+            "text": " ".join(t for t in texts if t),
+            "ocr_gaps": sum(1 for t in texts if not t),
             "source": g[0].get("source", "mit"),
         })
     # stable top-to-bottom, left-to-right order

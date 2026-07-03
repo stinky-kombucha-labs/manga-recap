@@ -63,7 +63,9 @@ def _flagged(pages: list[dict], flag_cfg: dict) -> list[tuple[dict, dict, list[s
     return out
 
 
-def repair_chapter(chapter_num: int, cfg: dict, do_repair: bool = True) -> Path:
+def collect_chapter(chapter_num: int, cfg: dict):
+    """Load one chapter and collect its flagged blocks needing a repair pass.
+    Keys are "<page_num>|<block_id>" (caller prefixes the chapter)."""
     novel = cfg["novel"]
     work_dir = PROJECT_ROOT / "temp" / novel["folder"] / chapter_dir_name(chapter_num)
     translations_path = work_dir / "translations.json"
@@ -78,29 +80,33 @@ def repair_chapter(chapter_num: int, cfg: dict, do_repair: bool = True) -> Path:
     total_blocks = sum(len(p.get("blocks", [])) for p in pages)
     print(f"Chapter {chapter_num}: {total_blocks} blocks, {len(flagged)} flagged")
 
-    # --- Local Lapa repair of flagged blocks that have English source ---
-    if do_repair and flagged:
-        pending = []
-        index = {}
-        for page, block, reasons in flagged:
-            original = (block.get("original") or "").strip()
-            if not any(ch.isalpha() for ch in original):
-                continue  # nothing to retranslate (empty source caption)
-            key = f"{page['page_num']}|{block['id']}"
-            pending.append((key, original))
-            index[key] = block
+    pending = []
+    index = {}
+    for page, block, reasons in flagged:
+        original = (block.get("original") or "").strip()
+        if not any(ch.isalpha() for ch in original):
+            continue  # nothing to retranslate (empty source caption)
+        # `verify`-only blocks are flagged for their SOURCE (fallback-OCR text),
+        # not their translation — re-translating buys nothing and, worse, every
+        # re-run would overwrite the human review fixes these blocks get. They
+        # go straight to review_todo.json.
+        if set(reasons) == {"verify"}:
+            continue
+        key = f"{page['page_num']}|{block['id']}"
+        pending.append((key, original))
+        index[key] = block
+    return data, translations_path, work_dir, pending, index
 
-        if pending:
-            print(f"  Repairing {len(pending)} block(s) with Lapa (corrective prompt)...")
-            results = translate_texts(pending, cfg.get("translation", {}), prompt_template=REPAIR_PROMPT)
-            fixed = 0
-            for key, block in index.items():
-                new = (results.get(key) or "").strip()
-                if new and new != (block.get("translation") or "").strip():
-                    block["translation"] = new
-                    fixed += 1
-            print(f"  Lapa changed {fixed} translation(s).")
-            jsonfmt.write(translations_path, data)
+
+def finish_chapter(chapter_num: int, cfg: dict, data: dict, translations_path: Path,
+                   work_dir: Path, repaired: int) -> Path:
+    """Re-flag after the (batched) repair pass, auto-clear untranslatable SFX,
+    write the small Claude review list."""
+    pages = data.get("pages", [])
+    flag_cfg = cfg.get("flag", {})
+    if repaired:
+        print(f"  Chapter {chapter_num}: Lapa changed {repaired} translation(s).")
+        jsonfmt.write(translations_path, data)
 
     # --- Re-flag, then auto-clear untranslatable Latin SFX ---
     remaining = _flagged(pages, flag_cfg)
@@ -118,6 +124,15 @@ def repair_chapter(chapter_num: int, cfg: dict, do_repair: bool = True) -> Path:
         latin_ratio = latin / (latin + cyr) if (latin + cyr) else 0.0
         if set(reasons) <= {"latin", "mixed"} and latin_ratio > 0.5:
             block["translation"] = ""
+            block["keep_empty"] = True   # deliberate blank: step2 must not refill it
+            auto_emptied += 1
+            continue
+        # Still a bare transliteration after the corrective pass ("STAREEE" →
+        # "СТАРЕЕЕ") — untranslatable SFX; blank it so the art stays instead of
+        # Cyrillic gibberish being rendered and narrated.
+        if set(reasons) == {"translit"}:
+            block["translation"] = ""
+            block["keep_empty"] = True
             auto_emptied += 1
             continue
         kept.append((page, block, reasons))
@@ -159,8 +174,37 @@ def main():
     parser.add_argument("--no-repair", action="store_true", help="only flag; don't run the Lapa repair pass")
     args = parser.parse_args()
     cfg = load_config()
+
+    # Collect flagged blocks across ALL chapters, repair them in ONE worker call
+    # (single model load per run), then re-flag and write per chapter.
+    loaded = []
+    all_pending: list[tuple[str, str]] = []
+    all_index: dict[str, dict] = {}
     for chapter_num in chapter_numbers(cfg):
-        repair_chapter(chapter_num, cfg, do_repair=not args.no_repair)
+        data, path, work_dir, pending, index = collect_chapter(chapter_num, cfg)
+        if not args.no_repair:
+            for key, text in pending:
+                all_pending.append((f"{chapter_num}|{key}", text))
+            for key, block in index.items():
+                all_index[f"{chapter_num}|{key}"] = block
+        loaded.append((chapter_num, data, path, work_dir))
+
+    results = {}
+    if all_pending:
+        print(f"Repairing {len(all_pending)} flagged block(s) with the corrective prompt...")
+        results = translate_texts(all_pending, cfg.get("translation", {}), prompt_template=REPAIR_PROMPT)
+
+    for chapter_num, data, path, work_dir in loaded:
+        prefix = f"{chapter_num}|"
+        repaired = 0
+        for key, block in all_index.items():
+            if not key.startswith(prefix):
+                continue
+            new = (results.get(key) or "").strip()
+            if new and new != (block.get("translation") or "").strip():
+                block["translation"] = new
+                repaired += 1
+        finish_chapter(chapter_num, cfg, data, path, work_dir, repaired)
 
 
 if __name__ == "__main__":

@@ -10,44 +10,75 @@ each bubble with auto-fit, manga-style stroke text.
 
 ## How it works
 
+One command runs everything for the chapters in `config.json -> run.chapters`:
+
 ```
-Step 1 — detect text + extract (once per chapter):
-    .venv/bin/python scripts/step1_extract.py
+.venv/bin/python scripts/run_pipeline.py            # full batch, TTS included
+.venv/bin/python scripts/run_pipeline.py --skip-tts # silent videos
+```
+
+Under the hood it chains the individual (re-runnable) steps:
+
+```
+Step 1 — detect text + extract:
+    scripts/step1_extract.py
     → CTD detector + 48px OCR + bubble merge
-    → writes temp/<novel>/<chapter>/translations.json (empty translations)
+    → PaddleOCR recovery of stylized/partially-read captions
+    → margin sweep for page-edge URLs; scanlation junk (credits/URLs/
+      watermarks) is kept as "noise" blocks to be erased, never translated
+    → writes temp/<novel>/<chapter>/translations.json
 
-Step 2 — translate EN→UK with a local LLM (re-runnable):
-    .venv/bin/python scripts/step2_translate.py
-    → fills each empty "translation" field via a local GGUF model
-    → only fills empty fields, so manual edits survive re-runs
+Step 2 — translate EN→UK with a local LLM:
+    scripts/step2_translate.py
+    → fills empty "translation" fields via a local GGUF model (one model
+      load for the whole batch); manual edits survive re-runs
+    → translation.glossary pins recurring stylized text (series title)
 
-Review / edit the "translation" field of each block in translations.json.
+Step 2b — flag + auto-repair suspicious translations:
+    scripts/step2b_repair.py
+    → deterministic checks (leftover Latin, hallucinated explanations,
+      length outliers, transliterated SFX, model glosses)
+    → re-translates flagged blocks locally with a corrective prompt,
+      blanks untranslatable SFX, writes review_todo.json (the short list
+      worth a human/Claude look — see REVIEW.md; optional)
 
-Step 3 — render + encode (re-runnable):
-    .venv/bin/python scripts/step3_render.py
-    .venv/bin/python scripts/step3_render.py --skip-tts
-    → LaMa inpaint + stroke text per page
-    → TTS narration per page (optional)
-    → 4K portrait MP4 in video_output/
+Step 3 — render + encode:
+    scripts/step3_render.py [--skip-tts]
+    → LaMa inpaint (noise blocks erased, bubbles cleaned) + stroke text
+    → TTS narration per page (optional) → 4K MP4 in video_output/
+    → per-page render/audio caches: edits re-render only what changed
+
+Step 3b — verify (no-eyeball QA):
+    scripts/step3b_verify.py [--fix]
+    → OCRs every rendered page, reports leftover English
+    → --fix queues junk leaks as noise blocks; the orchestrator then
+      re-renders just those pages and verifies again
 ```
 
-Translation (step 2) runs a local [Lapa LLM](https://huggingface.co/lapa-llm)
-GGUF (Ukrainian-tuned Gemma-3 12B) via `llama-cpp-python` in its own venv — the
-main venv never loads it, the same isolation as TTS. Point `translation.lapa_python`
-and `translation.model_path` in `config.json` at that venv and a `.gguf` file. The
-prompt is deliberately minimal (`"Переклади українською: …"`) — Lapa degrades with
-long instruction-heavy system prompts.
+Translation runs a local Ukrainian-tuned Gemma-3 12B GGUF (currently
+MamayLM-Gemma-3-12B-IT-v2.0) via `llama-cpp-python` in its own venv — the main
+venv never loads it, the same isolation as TTS. Point `translation.lapa_python`
+and `translation.model_path` in `config.json` at that venv and a `.gguf` file.
+The prompt is deliberately minimal (`"Переклади українською: …"`) — small local
+models degrade with long instruction-heavy system prompts.
 
 ## Key features
 
 - **Full bubble coverage** via the CTD (Comic Text Detector) model, then
   regions are unioned into bubbles so one bubble = one translation.
+- **Stylized-caption recovery** — captions the main OCR reads only partially
+  (or not at all) are re-read with PaddleOCR so nothing is lost in translation.
+- **Scanlation junk removal** — credits, URLs and site watermarks (fuzzy-matched
+  even when OCR mangles them) are erased from the page, not translated.
 - **Glyph-match fit** — translated text is sized to the original lettering,
   fits both width and height (stroke included), never overflows.
 - **Font fallback** — missing glyphs in the display font (e.g. Ukrainian
   І Ї Є Ґ, em dash, ellipsis) are auto-detected and drawn from a complete
   fallback font, so text is always correct.
 - **Backgrounds** — LaMa neural inpaint (default) or gaussian blur fallback.
+- **Self-verifying** — a post-render OCR pass reports any leftover source-language
+  text and auto-queues junk leftovers for inpainting, so batches don't need
+  page-by-page eyeballing.
 
 ## Requirements
 
@@ -94,7 +125,7 @@ git clone https://github.com/zyddnys/manga-image-translator
 ```
 
 Edit `config.json` (`novel.source_dir`, `run.chapters`, render/tts options),
-then run step 1 and step 2.
+then run `scripts/run_pipeline.py`.
 
 ## config.json (render block)
 

@@ -23,9 +23,9 @@ from manga_translator.config import Config
 from manga_translator.manga_translator import MangaTranslator
 from manga_translator.utils import Quadrilateral, TextBlock
 
-# Primary display font. Pangolin (Google Fonts, OFL) has full, correct Ukrainian
-# (І Ї Є Ґ), unlike Anime Ace which rendered them as "№". The Noto fallback below
-# is kept as a safety net but no longer triggers for Pangolin's covered glyphs.
+# Primary display font: Caveat (variable, weight set below). Full Ukrainian
+# coverage (І Ї Є Ґ); the Noto fallback below is a safety net for any glyph the
+# primary font still lacks (em dash, ellipsis in some fonts).
 ANIME_ACE = _MIT_ROOT.parent / "fonts" / "Caveat.ttf"
 _FONT_WEIGHT = 700   # applied to variable fonts (e.g. Caveat); no-op for static fonts
 NOTO_BOLD = Path("/usr/share/fonts/google-noto/NotoSans-Bold.ttf")
@@ -82,15 +82,6 @@ def _load_fallback(size: int) -> ImageFont.FreeTypeFont:
         _fallback_cache[size] = ImageFont.truetype(str(path), size)
     return _fallback_cache[size]
 
-
-def _notdef_bytes(primary: ImageFont.FreeTypeFont) -> bytes:
-    size = int(primary.size)
-    if size not in _notdef_cache:
-        try:
-            _notdef_cache[size] = primary.getmask("").tobytes()   # private-use => guaranteed missing
-        except Exception:
-            _notdef_cache[size] = b""
-    return _notdef_cache[size]
 
 
 def _load_primary_cmap() -> set:

@@ -1,5 +1,12 @@
 # Manhwa Recap Project State
 
+> **OUTDATED (kept for history).** This file describes the original
+> video-clip-based experiment (extracting frames from a recap video). The
+> project has since pivoted to translating full manga chapters from
+> `input/<novel>/chapter-XXXXX/` page images — see **CLAUDE.md** for the
+> current architecture and workflow (`scripts/run_pipeline.py` runs it end to
+> end). Nothing below reflects the current pipeline.
+
 ## Goal
 
 Create a manga recap style video from the source clip by replacing existing

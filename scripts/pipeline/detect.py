@@ -68,9 +68,14 @@ async def detect_page_blocks(image_rgb: np.ndarray, cfg: dict | None = None) -> 
         bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
         region_boxes.append(bbox)
         line_bboxes = [_quad_box(q) for q in r.lines]
+        # Per-line texts (parallel to line_bboxes) let the caller peel noise
+        # lines (a watermark textline-merged into a speech bubble) out of the
+        # region instead of poisoning the whole bubble.
+        line_texts = [str(t or "").strip() for t in (getattr(r, "texts", None) or [])]
         blocks.append({
             "bbox": bbox,
             "line_bboxes": line_bboxes,
+            "line_texts": line_texts if len(line_texts) == len(line_bboxes) else None,
             "text": (getattr(r, "text", "") or "").strip(),
             "source": "ctd",
         })

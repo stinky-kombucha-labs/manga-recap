@@ -159,6 +159,21 @@ def _text_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
+# Site watermarks that appear on nearly every page. OCR often mangles them
+# ("mangareader.net" → "wangareadek"), so exact substring checks miss them —
+# match fuzzily on the normalized text instead.
+_WATERMARK_TEXTS = ("mangareader.net", "mangareader", "ac.qq.com",
+                    "thyaeriatranslations.com", "translations.com")
+
+
+def _is_watermark_text(text: str) -> bool:
+    norm = _normalized_text(text)
+    if len(norm) < 6:
+        return False
+    return any(SequenceMatcher(None, norm, _normalized_text(w)).ratio() >= 0.72
+               for w in _WATERMARK_TEXTS)
+
+
 def _is_noise_text(text: str) -> bool:
     text = (text or "").strip()
     if not text:
@@ -173,6 +188,24 @@ def _is_noise_text(text: str) -> bool:
                              "typesetter", "proofread", "scanlat", "uploader", "raws",
                              "edited by", "edit:", "credits")):
         return True
+    # "Novel @ <site>" header: when the URL part is a separate box, the leftover
+    # "NOVEL Q"/"NOVEL @" stub is still scanlation junk, not story text.
+    if _re.fullmatch(r"(read\s+)?novel\s*[@qo0.:]*", tl):
+        return True
+    if _is_watermark_text(text):
+        return True
+    # Domain-like tokens ("AC.OO.CAV", "AC,OO.COSI" ← misread "ac.qq.com";
+    # "wavigareauer.ne" ← misread "mangareader.net"). OCR garbles the separators
+    # too, so allow commas/colons and a TLD-ish tail. Only short texts qualify —
+    # a long dialogue never turns into dotted tokens.
+    tokens = text.split()
+    if tokens and len(tokens) <= 3:
+        def _domainish(tok: str) -> bool:
+            if _re.fullmatch(r"[A-Za-z0-9]{1,6}([.,/:][A-Za-z0-9]{1,6}){1,4}", tok):
+                return True
+            return bool(_re.search(r"\.(ne[ti]?|com?[a-z]?\d?|org|cav)$", tok, _re.IGNORECASE))
+        if sum(1 for t in tokens if _domainish(t)) * 2 >= len(tokens):
+            return True
     cjk = sum(1 for c in text if unicodedata.east_asian_width(c) in ("W", "F"))
     if cjk and cjk / max(1, len(text)) > 0.5:
         return True
@@ -182,8 +215,13 @@ def _is_noise_text(text: str) -> bool:
 
 
 def _normalize_detected_block(raw: dict, width: int, height: int, source: str) -> dict | None:
+    """Normalize a raw detection into a block. Noise text (credits/URLs/watermarks)
+    is KEPT but marked ``noise`` — step 3 inpaints those boxes clean without
+    rendering anything, so scanlation junk disappears from the video instead of
+    staying English. Empty text still drops the block (handled by the caller)."""
     text = (raw.get("text") or raw.get("original") or "").strip()
-    if _is_noise_text(text):
+    is_noise = bool(text) and _is_noise_text(text)
+    if not text and _is_noise_text(text):
         return None
 
     line_bboxes = []
@@ -209,12 +247,15 @@ def _normalize_detected_block(raw: dict, width: int, height: int, source: str) -
     if not line_bboxes:
         line_bboxes = [bbox]
 
-    return {
+    block = {
         "bbox": bbox,
         "line_bboxes": line_bboxes,
         "text": text,
         "source": source,
     }
+    if is_noise:
+        block["noise"] = True
+    return block
 
 
 def _expanded_contains(container: list[int], inner: list[int], ratio: float = 0.25) -> bool:
@@ -276,7 +317,7 @@ def _merge_paddle_fallback(
     added = 0
     for raw in fallback_raw:
         block = _normalize_detected_block(raw, width, height, "paddle")
-        if not block:
+        if not block or block.get("noise"):
             continue
         area = _bbox_area(block["bbox"])
         if area < min_area or area / image_area > max_area_ratio:
@@ -289,6 +330,100 @@ def _merge_paddle_fallback(
     if added:
         print(f"+{added} paddle", end=" ")
     return _sort_blocks(merged)
+
+
+def _paddle_result_lines(res: dict, off_x: int, off_y: int, min_conf: float) -> list[tuple[list[int], str]]:
+    """Extract (bbox, text) lines from one PaddleOCR predict() result, offset back
+    to page coordinates. Shared by the empty-box recovery and the margin sweep."""
+    def _as_list(v):
+        # rec_* may be a numpy array, where `v or []` raises "ambiguous truth value".
+        try:
+            return list(v) if v is not None and len(v) else []
+        except TypeError:
+            return []
+
+    texts = _as_list(res.get("rec_texts"))
+    scores = _as_list(res.get("rec_scores"))
+    polys = _as_list(res.get("rec_polys")) or _as_list(res.get("rec_boxes"))
+
+    out: list[tuple[list[int], str]] = []
+    for text, conf, poly in zip(texts, scores, polys):
+        if float(conf) < min_conf or not str(text).strip():
+            continue
+        arr = np.array(poly)
+        if arr.ndim == 2:
+            xs = [p[0] for p in arr.tolist()]
+            ys = [p[1] for p in arr.tolist()]
+            bb = [int(min(xs)) + off_x, int(min(ys)) + off_y,
+                  int(max(xs)) + off_x, int(max(ys)) + off_y]
+        else:
+            a = arr.flatten()[:4]
+            bb = [int(min(a[0], a[2])) + off_x, int(min(a[1], a[3])) + off_y,
+                  int(max(a[0], a[2])) + off_x, int(max(a[1], a[3])) + off_y]
+        out.append((bb, str(text).strip()))
+    return out
+
+
+def _margin_sweep(image_path: Path, blocks: list[dict], detection_cfg: dict) -> list[dict]:
+    """OCR the top/bottom page margins with PaddleOCR.
+
+    CTD routinely ignores the scanlation URL at the very bottom of a page and the
+    "Novel @ http://..." line at the very top, so that English stays in the video.
+    Lines found here that look like noise (URLs/credits/watermarks, incl. the CJK
+    site logo) become `noise` blocks — step 3 inpaints them clean. Real story text
+    found in a margin becomes a normal block and gets translated.
+    """
+    if not detection_cfg.get("margin_sweep", True):
+        return blocks
+    ratio = float(detection_cfg.get("margin_ratio", 0.05))
+    min_conf = float(detection_cfg.get("margin_min_confidence", 0.5))
+    try:
+        from pipeline.ocr import _get_paddle_ocr
+        ocr = _get_paddle_ocr()
+        page = Image.open(image_path).convert("RGB")
+    except Exception as exc:
+        print(f"\n    Margin sweep unavailable: {exc}", end=" ")
+        return blocks
+
+    W, H = page.size
+    strip_h = max(40, int(H * ratio))
+
+    def _covered(cx: float, cy: float) -> bool:
+        return any(b["bbox"][0] <= cx <= b["bbox"][2] and b["bbox"][1] <= cy <= b["bbox"][3]
+                   for b in blocks)
+
+    lines: list[dict] = []
+    for oy in (0, H - strip_h):
+        try:
+            result = ocr.predict(np.array(page.crop((0, oy, W, oy + strip_h))))
+        except Exception:
+            continue
+        if not result:
+            continue
+        for bb, text in _paddle_result_lines(result[0], 0, oy, min_conf):
+            mcx, mcy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+            if _covered(mcx, mcy):
+                continue
+            if sum(1 for ch in text if ch.isalnum()) < 4:
+                continue
+            lines.append({"bbox": bb, "line_bboxes": [bb], "text": text, "source": "margin"})
+
+    # Merge neighbouring margin lines FIRST, then classify the joined text: a
+    # stylized URL banner OCRs as fragments ("HTTP://" + "KYAERATRANSLA...")
+    # that only look like noise once glued back together.
+    gap = int(detection_cfg.get("bubble_merge_gap", 36))
+    added_noise = added_story = 0
+    for mb in merge_into_bubbles(lines, gap=gap):
+        mb.pop("ocr_gaps", None)
+        if _is_noise_text(mb["text"]):
+            mb["noise"] = True
+            added_noise += 1
+        else:
+            added_story += 1
+        blocks.append(mb)
+    if added_noise or added_story:
+        print(f"+{added_noise} margin-noise +{added_story} margin-text", end=" ")
+    return blocks
 
 
 def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detection_cfg: dict) -> list[dict]:
@@ -305,10 +440,14 @@ def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detect
     """
     if not detection_cfg.get("recover_empty_ocr", True):
         return blocks
-    empties = [b for b in blocks if not (b.get("text") or "").strip()]
-    if not empties:
+    # Recover fully-empty blocks AND partially read bubbles (ocr_gaps > 0):
+    # a caption where ocr48px read 2 of 6 lines produces a gutted `original`
+    # that translates into nonsense, so it must be re-read whole.
+    candidates = [b for b in blocks
+                  if not b.get("noise")
+                  and (not (b.get("text") or "").strip() or int(b.get("ocr_gaps") or 0) > 0)]
+    if not candidates:
         return blocks
-    non_empty = [b for b in blocks if (b.get("text") or "").strip()]
 
     try:
         from pipeline.ocr import _get_paddle_ocr
@@ -330,7 +469,11 @@ def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detect
     # the line boxes back to page coords, and GROW the block to fit — that way the
     # inpaint mask covers the full English and Lapa gets the complete sentence.
     recovered = 0
-    for block in empties:
+    for block in candidates:
+        # Text read by ocr48px in OTHER blocks must not be re-claimed, but the
+        # candidate's OWN partial lines must be re-read (that's the point).
+        others_with_text = [b for b in blocks
+                            if b is not block and (b.get("text") or "").strip()]
         x1, y1, x2, y2 = block["bbox"]
         pad_x = max(30, int((x2 - x1) * 0.10))
         pad_y = max(60, int((y2 - y1) * 0.6))
@@ -342,38 +485,14 @@ def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detect
             continue
         if not result:
             continue
-        res = result[0]
-
-        def _as_list(v):
-            # rec_* may be a numpy array, where `v or []` raises "ambiguous truth value".
-            try:
-                return list(v) if v is not None and len(v) else []
-            except TypeError:
-                return []
-
-        texts = _as_list(res.get("rec_texts"))
-        scores = _as_list(res.get("rec_scores"))
-        polys = _as_list(res.get("rec_polys")) or _as_list(res.get("rec_boxes"))
 
         found: list[tuple[list[int], str, float, float]] = []
-        for text, conf, poly in zip(texts, scores, polys):
-            if float(conf) < min_conf or not str(text).strip():
-                continue
-            arr = np.array(poly)
-            if arr.ndim == 2:
-                xs = [p[0] for p in arr.tolist()]
-                ys = [p[1] for p in arr.tolist()]
-                bb = [int(min(xs)) + cx1, int(min(ys)) + cy1,
-                      int(max(xs)) + cx1, int(max(ys)) + cy1]
-            else:
-                a = arr.flatten()[:4]
-                bb = [int(min(a[0], a[2])) + cx1, int(min(a[1], a[3])) + cy1,
-                      int(max(a[0], a[2])) + cx1, int(max(a[1], a[3])) + cy1]
+        for bb, text in _paddle_result_lines(result[0], cx1, cy1, min_conf):
             mcx, mcy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
-            # Skip text that belongs to a bubble ocr48px already read.
-            if any(_center_in(nb["bbox"], mcx, mcy) for nb in non_empty):
+            # Skip text that belongs to a DIFFERENT bubble ocr48px already read.
+            if any(_center_in(nb["bbox"], mcx, mcy) for nb in others_with_text):
                 continue
-            found.append((bb, str(text).strip(), mcx, mcy))
+            found.append((bb, text, mcx, mcy))
 
         if not found:
             continue
@@ -392,7 +511,19 @@ def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detect
             row.sort(key=lambda it: it[2])
         found = [it for row in rows for it in row]
         recovered_text = " ".join(it[1] for it in found)
-        if _is_noise_text(recovered_text):           # recovered a credit line / URL — skip
+        if _is_noise_text(recovered_text):
+            # Recovered a credit line / URL / watermark — mark noise so step 3
+            # inpaints the box clean instead of leaving the English in the video.
+            block["text"] = recovered_text
+            block["noise"] = True
+            block.pop("ocr_gaps", None)
+            recovered += 1
+            continue
+        # For a partially read bubble only accept the re-read if it actually
+        # recovered MORE text than ocr48px managed (Paddle can fail on halftones).
+        old_letters = sum(1 for ch in (block.get("text") or "") if ch.isalnum())
+        new_letters = sum(1 for ch in recovered_text if ch.isalnum())
+        if new_letters <= old_letters:
             continue
         boxes = [it[0] for it in found]
         block["text"] = recovered_text
@@ -401,6 +532,7 @@ def _recover_empty_text_with_paddle(image_path: Path, blocks: list[dict], detect
         block["line_bboxes"] = boxes
         block["bbox"] = [min(b[0] for b in boxes), min(b[1] for b in boxes),
                          max(b[2] for b in boxes), max(b[3] for b in boxes)]
+        block.pop("ocr_gaps", None)
         recovered += 1
 
     if recovered:
@@ -419,8 +551,36 @@ async def _detect_page(image_path: Path, detection_cfg: dict | None = None) -> l
 
     raw_blocks = await detect_page_blocks(np.array(image), detection_cfg)
 
-    blocks = []
+    # Peel noise LINES out of multi-line regions first: MIT's textline merge can
+    # glue a watermark ("mangareader.net") onto a speech bubble, and classifying
+    # the joined text would mark the whole dialogue as noise (or, before noise
+    # blocks existed, silently drop it). Split: story lines stay one block,
+    # noise lines become their own blocks.
+    split_raws = []
     for raw in raw_blocks:
+        line_texts = raw.get("line_texts")
+        lbs = raw.get("line_bboxes") or []
+        if line_texts and len(lbs) > 1:
+            story, noisy = [], []
+            for bb, t in zip(lbs, line_texts):
+                (noisy if (t and _is_noise_text(t)) else story).append((bb, t))
+            if story and noisy:
+                sb_boxes = [bb for bb, _ in story]
+                split_raws.append({
+                    "bbox": [min(b[0] for b in sb_boxes), min(b[1] for b in sb_boxes),
+                             max(b[2] for b in sb_boxes), max(b[3] for b in sb_boxes)],
+                    "line_bboxes": sb_boxes,
+                    "text": " ".join(t for _, t in story if t),
+                    "source": raw.get("source", "ctd"),
+                })
+                for bb, t in noisy:
+                    split_raws.append({"bbox": bb, "line_bboxes": [bb], "text": t,
+                                       "source": raw.get("source", "ctd")})
+                continue
+        split_raws.append(raw)
+
+    blocks = []
+    for raw in split_raws:
         src = raw.get("source", "ctd")
         block = _normalize_detected_block(raw, width, height, src)
         if block:
@@ -434,12 +594,22 @@ async def _detect_page(image_path: Path, detection_cfg: dict | None = None) -> l
                                "text": (raw.get("text") or "").strip(), "source": src})
 
     # Union regions belonging to the same speech bubble -> one bubble per block.
+    # Noise (credits/URLs/watermarks) merges separately so it can never pollute a
+    # story bubble's text or geometry.
     gap = int(detection_cfg.get("bubble_merge_gap", 36))
-    blocks = merge_into_bubbles(blocks, gap=gap)
+    story = [b for b in blocks if not b.get("noise")]
+    noise = [b for b in blocks if b.get("noise")]
+    blocks = merge_into_bubbles(story, gap=gap)
+    for nb in merge_into_bubbles(noise, gap=gap):
+        nb["noise"] = True
+        blocks.append(nb)
 
-    # Re-OCR boxes ocr48px left empty (stylized captions) with PaddleOCR so they
-    # carry text into translation instead of staying blank.
+    # Re-OCR boxes ocr48px left empty or read only PARTIALLY (stylized captions)
+    # with PaddleOCR so they carry complete text into translation.
     blocks = _recover_empty_text_with_paddle(image_path, blocks, detection_cfg)
+
+    # Catch page-margin text CTD never detects (bottom URL, top "Novel @ ..." line).
+    blocks = _margin_sweep(image_path, blocks, detection_cfg)
 
     # Optional PaddleOCR fill (off by default; CTD already covers full bubbles).
     if detection_cfg.get("paddle_fallback", False):
@@ -537,6 +707,22 @@ def _match_existing_translation(new_block: dict, old_blocks: list[dict], used_ol
     dist = _center_distance_ratio(new_block.get("bbox"), old.get("bbox"))
     text_sim = _text_similarity(new_block.get("text", ""), old.get("original", ""))
 
+    # If the OCR text changed substantially (e.g. a partially read caption was
+    # re-recovered in full), the old translation matches stale source text —
+    # re-translate instead of reattaching it. Empty old originals are hand-filled
+    # captions (human read the page by eye); those always survive.
+    old_orig = (old.get("original") or "").strip()
+    new_text = (new_block.get("text") or "").strip()
+    if old_orig and new_text:
+        if text_sim < 0.5:
+            return ""
+        # Source text grew a lot (a recovery filled in lines OCR had dropped) —
+        # the old translation covers only a fragment of the caption.
+        old_letters = sum(1 for ch in old_orig if ch.isalnum())
+        new_letters = sum(1 for ch in new_text if ch.isalnum())
+        if new_letters > old_letters * 1.3:
+            return ""
+
     if score >= 0.38 or iou >= 0.20 or (text_sim >= 0.92 and dist <= 0.22):
         used_old.add(old_key)
         return old.get("translation", "")
@@ -592,14 +778,18 @@ def extract_chapter(chapter_num: int, cfg: dict) -> Path:
         used_prev: set[int] = set()
         blocks_out = []
         for bid, b in enumerate(blocks_raw):
-            blocks_out.append({
+            out = {
                 "id": bid,
                 "original": b["text"],
-                "translation": _match_existing_translation(b, prev, used_prev),
+                "translation": "" if b.get("noise")
+                               else _match_existing_translation(b, prev, used_prev),
                 "detector": b.get("source", "mit"),
                 "bbox": b["bbox"],
                 "line_bboxes": b["line_bboxes"],
-            })
+            }
+            if b.get("noise"):
+                out["noise"] = True    # inpainted clean in step 3, never translated/narrated
+            blocks_out.append(out)
 
         result_pages.append({
             "page_num": idx,

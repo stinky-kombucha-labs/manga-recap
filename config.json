@@ -6,7 +6,7 @@
     "total_chapters": 959
   },
   "run": {
-    "chapters": "1",
+    "chapters": "2-3",
     "output_dir": "video_output"
   },
   "video": {
@@ -18,6 +18,9 @@
     "paddle_fallback": false,
     "recover_empty_ocr": true,
     "recover_min_confidence": 0.5,
+    "margin_sweep": true,
+    "margin_ratio": 0.05,
+    "margin_min_confidence": 0.5,
     "bubble_merge_gap": 36,
     "paddle_min_confidence": 0.64,
     "fallback_duplicate_iou": 0.18,
@@ -48,7 +51,7 @@
   },
   "translation": {
     "lapa_python": "/home/user/PycharmProjects/PythonProject_Lapa_LLM/.venv/bin/python",
-    "model_path": "/home/user/PycharmProjects/PythonProject_Lapa_LLM/models/lapa-v0.1.2-instruct-Q8_0.gguf",
+    "model_path": "/home/user/PycharmProjects/PythonProject_Lapa_LLM/models/MamayLM-Gemma-3-12B-IT-v2.0-Q8_0.gguf",
     "n_gpu_layers": -1,
     "n_ctx": 2048,
     "flash_attn": true,
@@ -56,6 +59,9 @@
     "top_p": 0.9,
     "top_k": 25,
     "repeat_penalty": 1.0,
-    "overwrite": false
+    "overwrite": false,
+    "glossary": {
+      "TALES OF DEMONS AND GODS": "Оповіді про демонів і богів"
+    }
   }
 }

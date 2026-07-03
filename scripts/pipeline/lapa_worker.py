@@ -27,17 +27,24 @@ from llama_cpp import Llama
 
 # Strip a leading "Переклад:" / "Translation:" label the model sometimes adds.
 _LABEL_RE = re.compile(r"^(Переклад|Українською|Translation)\s*:\s*", re.IGNORECASE)
+# Whole lines that are meta-chatter, not translation ("Ось переклад:").
+_META_LINE_RE = re.compile(r"^(ось|нижче)?\s*(точний|дослівний)?\s*переклад(ений текст)?\s*(українською( мовою)?)?\s*:?\s*$",
+                           re.IGNORECASE)
 
 
 def _clean(raw: str) -> str:
     raw = (raw or "").strip()
     raw = _LABEL_RE.sub("", raw).strip()
-    # On the rare multi-line answer, keep the longest non-empty line (the actual
-    # translation, not a stray note).
+    # Multi-line answers are usually a long caption wrapped by the model — JOIN the
+    # lines (dropping label/meta lines). The old "keep the longest line" heuristic
+    # silently threw away most of a long narration block.
     if "\n" in raw:
-        parts = [p.strip() for p in raw.splitlines() if p.strip()]
-        if parts:
-            raw = max(parts, key=len)
+        parts = []
+        for p in raw.splitlines():
+            p = _LABEL_RE.sub("", p.strip()).strip()
+            if p and not _META_LINE_RE.match(p):
+                parts.append(p)
+        raw = " ".join(parts)
     return raw.strip()
 
 

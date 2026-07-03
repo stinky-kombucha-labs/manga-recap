@@ -73,6 +73,7 @@ def _page_render_signature(page: dict, src_page: Path, render_cfg: dict) -> str:
             "original": block.get("original", ""),
             "translation": block.get("translation", ""),
             "detector": block.get("detector", ""),
+            "noise": bool(block.get("noise")),
         })
 
     payload = {
@@ -147,7 +148,11 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
         rendered = rendered_dir / f"{idx:04d}.png"
         print(f"  [{idx}/{len(pages)}] {page['source_file']}")
 
-        render_blocks = [b for b in blocks if b.get("translation", "").strip()]
+        # Blocks with a translation get cleaned + typeset; noise blocks (scanlation
+        # credits/URLs/watermarks) get cleaned only — the box is inpainted and left
+        # empty, so the junk disappears from the video.
+        render_blocks = [b for b in blocks
+                         if b.get("translation", "").strip() or b.get("noise")]
         signature = _page_render_signature(page, src_page, render_cfg)
         cache_key = str(idx)
         cache_hit = rendered.exists() and render_cache.get(cache_key) == signature
@@ -210,8 +215,17 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
         audio_path = entry.pop("audio")
         entry["audio"] = audio_path if (tts_enabled and audio_path.exists()) else None
 
-    # Encode 4K YouTube MP4
+    # Encode 4K YouTube MP4. Skip when the MP4 is newer than every rendered page
+    # and audio file — a second pipeline pass (e.g. after step3b --fix touched a
+    # few chapters) must not re-encode untouched chapters. (Config changes to
+    # crf/page_duration alone won't trigger a re-encode; use --force-render.)
     out_path = out_dir / f"{chapter_dir_name(chapter_num)}.mp4"
+    inputs = [e["image"] for e in page_entries] + [e["audio"] for e in page_entries if e["audio"]]
+    if (not force_render and out_path.exists()
+            and all(p.exists() for p in inputs)
+            and all(out_path.stat().st_mtime_ns > p.stat().st_mtime_ns for p in inputs)):
+        print(f"\n  Encode cached: {out_path}")
+        return out_path
     print(f"\n  Encoding 4K MP4...")
     _encode_4k(page_entries, out_path, page_duration_min, video_cfg.get("crf", 18))
     print(f"  -> {out_path}")

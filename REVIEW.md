@@ -23,10 +23,16 @@ straight to `step3_render.py`.
 
 `reasons` legend: `empty` (no translation), `latin` (leftover English),
 `explanation` (Lapa explained instead of translating), `mixed` (mixed-script word),
-`length` (translation too long/short vs original), `verify` (caption recovered by a
-fallback OCR — the source text itself may be misread, so **open the page image** and
-confirm the meaning; this is how OCR errors like `WORD`→`WORLD` ("Слово" vs "Світ") get
-caught — a text-only check cannot see them).
+`length` (translation too long/short vs original), `translit` (single-word SFX
+transliterated instead of translated, e.g. "STAREEE"→"СТАРЕЕЕ" — give a natural
+Ukrainian SFX or blank it), `gloss` (model left "[СЛОВО]" brackets or Latin in
+parentheses — remove the gloss, keep clean Ukrainian), `verify` (caption recovered
+by a fallback OCR — the source text itself may be misread, so **open the page
+image** and confirm the meaning; this is how OCR errors like `WORD`→`WORLD`
+("Слово" vs "Світ") get caught — a text-only check cannot see them).
+
+Blocks with `"noise": true` never appear here — they are inpainted clean and never
+translated. Don't add translations to them.
 
 ## translations.json block shape
 ```json
@@ -84,3 +90,12 @@ You can open the page itself to understand context:
 
 Save the file and give a short report: how many blocks you fixed and what (OCR errors,
 removed "explanations", filled-in empties). Then I run `step3_render.py`.
+
+**Important — review fixes survive `step3_render.py` / `step3b_verify.py` re-runs,
+but NOT a full re-detect.** Re-running `step1_extract.py` (or the whole
+`run_pipeline.py`) re-OCRs the pages; if the fresh OCR text differs from the old
+one, the carry-over guard deliberately drops the attached translation for
+re-translation — including a reviewed one. So the order is: batch → review →
+`step3_render.py`. Don't re-run step1/step2b after a review unless you're ready
+to re-review. (`step2b` itself no longer touches reviewed blocks: `verify`-only
+flags are excluded from its repair pass.)

@@ -68,7 +68,16 @@ def _get_paddle_ocr():
         os.environ.setdefault("DISABLE_MODEL_SOURCE_CHECK", "True")
         from paddleocr import PaddleOCR
 
-        _PADDLE_OCR = PaddleOCR(use_textline_orientation=True, lang="en")
+        # Manga pages are always upright: the doc-orientation classifier must be
+        # OFF — on wide, thin crops (the margin-sweep strips) it "helpfully"
+        # rotates the image 90° and returns coordinates in the rotated space,
+        # which scattered phantom vertical boxes down the page edge.
+        _PADDLE_OCR = PaddleOCR(
+            use_textline_orientation=True,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            lang="en",
+        )
     return _PADDLE_OCR
 
 

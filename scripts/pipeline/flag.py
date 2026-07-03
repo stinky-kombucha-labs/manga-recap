@@ -13,6 +13,7 @@ Patterns ported from the sister Lapa project's problem detector.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
 # Lapa "explained" the text instead of translating it (the failure mode on short /
 # garbled OCR like "WA", "ATP"): "це абревіатура…", "перекладається як…", "це речення…".
@@ -67,6 +68,34 @@ def _mixed_script(text: str) -> bool:
     return False
 
 
+# Ukrainian → Latin romanization used to detect transliterated non-translations:
+# Lapa turns SFX like "STAREEE" into "СТАРЕЕЕ" (meaningless Ukrainian). Romanizing
+# the translation back and comparing with the original catches that class.
+_UKR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e", "є": "ie",
+    "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "i", "й": "i", "к": "k", "л": "l",
+    "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ь": "",
+    "ю": "iu", "я": "ia", "'": "", "’": "",
+}
+
+
+def _is_transliteration(original: str, translation: str) -> bool:
+    """True when a single-word translation is just the original spelled in
+    Cyrillic. Multi-word originals are skipped — proper names (NIE LI → Ні Лі)
+    legitimately transliterate."""
+    orig = re.sub(r"[^A-Za-z]", "", original or "")
+    if len(orig) < 5 or " " in (original or "").strip():
+        return False
+    trans = (translation or "").strip().lower()
+    if not trans or not re.fullmatch(r"[а-яіїєґ'’.…!?~-]+", trans, re.IGNORECASE):
+        return False
+    romanized = "".join(_UKR_TO_LAT.get(ch, ch) for ch in trans if ch.isalpha())
+    if not romanized:
+        return False
+    return SequenceMatcher(None, romanized, orig.lower()).ratio() >= 0.75
+
+
 def flag_block(block: dict, cfg: dict | None = None) -> list[str]:
     """Return reasons this block's translation is suspicious (empty list if fine)."""
     c = {**_DEFAULTS, **(cfg or {})}
@@ -74,9 +103,17 @@ def flag_block(block: dict, cfg: dict | None = None) -> list[str]:
     translation = (block.get("translation") or "").strip()
     reasons: list[str] = []
 
+    # Noise (scanlation credits/URLs/watermarks): inpainted clean in step 3,
+    # never translated or narrated — nothing to review.
+    if block.get("noise"):
+        return reasons
+
     # Missing translation: only worth flagging if the source is real text. Short SFX /
     # interjections ("WA", "AH", garbled OCR) are meant to stay empty (rendered as art).
+    # keep_empty marks a DELIBERATE blank (step2b cleared untranslatable SFX).
     if not translation:
+        if block.get("keep_empty"):
+            return reasons
         letters = sum(1 for ch in original if ch.isalpha())
         return ["empty"] if letters >= c["empty_min_letters"] else reasons
 
@@ -86,6 +123,15 @@ def flag_block(block: dict, cfg: dict | None = None) -> list[str]:
 
     if _mixed_script(translation):
         reasons.append("mixed")
+
+    # SFX transliterated instead of translated ("STAREEE" → "СТАРЕЕЕ").
+    if _is_transliteration(original, translation):
+        reasons.append("translit")
+
+    # Model glosses: editorial "[СЛОВО]" brackets or Latin kept in parentheses
+    # ("(GLORY CIT)") — the model wasn't sure; the gloss must not reach the video.
+    if re.search(r"\[[^\]]+\]", translation) or re.search(r"\([^()]*[A-Za-z]{3,}[^()]*\)", translation):
+        reasons.append("gloss")
 
     latin = len(re.findall(r"[A-Za-z]", translation))
     cyr = len(re.findall(r"[А-Яа-яІіЇїЄєҐґ]", translation))
