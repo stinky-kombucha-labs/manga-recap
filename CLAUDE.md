@@ -26,6 +26,12 @@ the Claude pass over each `review_todo.json` (see step 2c) — re-run
 step2/step2b batch ALL chapters into one worker call (one GGUF load per run,
 not per chapter). step3 also skips re-encoding when no page/audio changed.
 
+**Batch flow for many chapters:** set `run.chapters` (e.g. "4-23") → run
+`run_pipeline.py` (no AI needed, GPU-bound) → then `/review-batch` in a Claude
+Code session (.claude/commands/review-batch.md) reviews every chapter's
+review_todo.json, applies fixes, re-renders and verifies. After review never
+re-run step1/step2 for those chapters.
+
 ```
 Step 1 — OCR + detect bubbles (once per chapter):
   .venv/bin/python scripts/step1_extract.py
@@ -188,11 +194,27 @@ video_output/
 
 **Caches (both in the chapter's `temp/` dir):** `rendered/.render_cache.json` keys each page render by a signature of its blocks+source+render cfg; `audio/.audio_cache.json` keys each page's TTS by a SHA of its narration text. Both mean step 3 only redoes work whose input changed — edit a translation and just that page re-renders AND its audio regenerates. (Before the audio cache, TTS only checked file-exists, so edited/re-translated pages kept stale narration.)
 
+## Reading order (narration)
+
+Blocks are ordered by `step1_extract.py::_sort_blocks`: vertical bands with a
+tolerance of `detection.reading_band_ratio` (default 0.2 = 1/5 page height) —
+blocks whose tops fall in the same band are one visual row. Inside a row,
+blocks cluster into COLUMNS by horizontal overlap; columns read left→right,
+top-to-bottom within each column (a row can hold three panels — a plain
+left-half/right-half split misordered the centre one). Plain (y, x) sorting
+read the right panel first whenever its bubble sat a few px higher than the
+left one. Reordering existing translations.json without re-detecting: sort each
+page's blocks with `_sort_blocks`, reassign ids, re-stamp
+`rendered/.render_cache.json` with fresh `_page_render_signature`s (renders
+are order-independent) — then step3 only re-voices and re-encodes.
+
 ## 4K output format
 
 - **Resolution:** 3840×2160 (16:9 landscape) — manga page scaled to fit height 2160, pillarboxed to 3840 wide with black bars
-- **Codec:** H.264 high profile, CRF 18
-- **Audio:** 384 kbps AAC (Oleksa TTS)
+- **Codec:** H.264 high profile, CRF 18, `-tune stillimage`, `+faststart`
+- **Audio:** Oleksa TTS (22.05 kHz mono) → loudnorm −14 LUFS / TP −1.5 → 48 kHz AAC 384 kbps (YouTube target loudness)
+- **Narration:** blocks joined in reading order; a block without terminal punctuation gets a "." so TTS doesn't run bubbles together
+- **TTS prosody:** `tts_batch_worker.py` synthesizes SENTENCE BY SENTENCE (0.35 s pause between sentences) — on whole-page inputs the VITS model flattens intonation and questions stop sounding like questions. `?`/`!`/`…` do reach the model (formatter keeps them, lowercases text, converts «»→" and —→-); leftover LATIN in a translation is transliterated char-by-char into gibberish — one more reason the `latin` flag must catch every leftover word
 - **Compatible:** YouTube 4K
 
 ## Dependencies
@@ -206,8 +228,9 @@ video_output/
 
 - PaddleOCR v3+: use `predict()` not `ocr()`, `use_textline_orientation` not `use_angle_cls`
 - TTS worker must run with `cwd=/home/user/PycharmProjects/tts/` — model files (config.yaml, etc.) are relative paths
-- NVENC fails at 2912×4120 — always use `libx264` + `framerate 1` for still-image manga slides
+- NVENC fails when encoding at the odd SOURCE resolution (2912×4120); at the standard 3840×2160 output it works fine — `video.encoder: "h264_nvenc"` (default in config) encodes on the GPU and frees the CPU, with automatic per-segment fallback to `libx264` (`-tune stillimage`). PaddleOCR here is a CPU build — step1 recovery/margin sweeps and step3b verify are the CPU-heavy stages
 - LaMa + Dragoman together would exceed VRAM — Dragoman removed from this project; translation is manual
 - Detection: prefer MIT **CTD** detector (`Detector.ctd`, detect_size=2048, text_threshold=0.3, box_threshold=0.4). `default`/DBNet drops low-contrast mid-bubble lines; PaddleOCR fragments bubbles. After detect+merge, union split regions into one bubble so one bubble = one translation (avoids duplicate/overlapping text)
 - `temp/` was emptied to Trash once by an external process (PyCharm/cleanup), not our scripts — keep a backup of `translations.json` (see `backups/`)
 - **Font glyphs:** Anime Ace renders missing glyphs (І Ї Є Ґ, em dash «—», ellipsis «…») as a "№" box. `render.py` auto-detects missing glyphs (bitmap == .notdef) and draws them per-character from NotoSans-Bold; the rest stays Anime Ace. Do NOT transliterate Ukrainian letters to Latin lookalikes (the old Ï→"П" hack was wrong). Text is upper-cased only.
+- **TTS worker must NOT skip existing WAVs** — step3's narration-hash audio cache decides what needs re-voicing; the old `if out_path.exists(): continue` in `tts_batch_worker.py` silently kept stale audio after translation edits. If audio ever looks stale, delete the chapter's `audio/.audio_cache.json` to force a full re-voice.

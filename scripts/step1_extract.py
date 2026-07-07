@@ -281,8 +281,55 @@ def _is_duplicate_block(candidate: dict, existing: list[dict], iou_threshold: fl
     return False
 
 
-def _sort_blocks(blocks: list[dict]) -> list[dict]:
-    return sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0], b["bbox"][3], b["bbox"][2]))
+def _sort_blocks(blocks: list[dict], page_size: tuple[int, int] | None = None,
+                 band_ratio: float = 0.2) -> list[dict]:
+    """Reading order for a left-to-right manhua page.
+
+    Plain (y, x) sorting reads the RIGHT panel first whenever its bubble sits a
+    few pixels higher than the left panel's. Instead, blocks whose tops lie
+    within ``band_ratio`` of the page height (default 1/5) form one visual row;
+    inside a row the left half of the page is read before the right half,
+    top-to-bottom within each half. So side-by-side panels read left-first even
+    when the left bubble starts a bit lower.
+    """
+    if not blocks:
+        return blocks
+    if page_size:
+        width, height = page_size
+    else:
+        width = max(b["bbox"][2] for b in blocks)
+        height = max(b["bbox"][3] for b in blocks)
+    tol = max(1.0, height * float(band_ratio))
+
+    ordered = sorted(blocks, key=lambda b: (b["bbox"][1], b["bbox"][0]))
+    rows: list[list[dict]] = []
+    anchor_y: float | None = None
+    for b in ordered:
+        y = b["bbox"][1]
+        if anchor_y is None or y - anchor_y > tol:
+            rows.append([])
+            anchor_y = y
+        rows[-1].append(b)
+
+    out: list[dict] = []
+    for row in rows:
+        # Cluster the row's blocks into COLUMNS by horizontal overlap — a page
+        # can have three panels side by side (left/centre/right), so a simple
+        # left-half/right-half split misorders the centre one. Columns read
+        # left→right, top-to-bottom inside each column.
+        cols: list[list[dict]] = []
+        for b in sorted(row, key=lambda b: b["bbox"][0]):
+            for col in cols:
+                if any(b["bbox"][0] < o["bbox"][2] and o["bbox"][0] < b["bbox"][2]
+                       for o in col):
+                    col.append(b)
+                    break
+            else:
+                cols.append([b])
+        for col in cols:
+            col.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
+            out.extend(col)
+    return out
 
 
 def _merge_paddle_fallback(
@@ -291,14 +338,15 @@ def _merge_paddle_fallback(
     image_size: tuple[int, int],
     detection_cfg: dict,
 ) -> list[dict]:
+    band = float(detection_cfg.get("reading_band_ratio", 0.2))
     if not detection_cfg.get("paddle_fallback", True):
-        return _sort_blocks(blocks)
+        return _sort_blocks(blocks, image_size, band)
 
     try:
         from pipeline.ocr import ocr_page as paddle_ocr_page
     except Exception as exc:
         print(f"\n    Paddle fallback unavailable: {exc}", end=" ")
-        return _sort_blocks(blocks)
+        return _sort_blocks(blocks, image_size, band)
 
     min_conf = float(detection_cfg.get("paddle_min_confidence", 0.64))
     duplicate_iou = float(detection_cfg.get("fallback_duplicate_iou", 0.18))
@@ -311,7 +359,7 @@ def _merge_paddle_fallback(
         fallback_raw = paddle_ocr_page(image_path, min_confidence=min_conf)
     except Exception as exc:
         print(f"\n    Paddle fallback failed: {exc}", end=" ")
-        return _sort_blocks(blocks)
+        return _sort_blocks(blocks, image_size, band)
 
     merged = list(blocks)
     added = 0
@@ -329,7 +377,7 @@ def _merge_paddle_fallback(
 
     if added:
         print(f"+{added} paddle", end=" ")
-    return _sort_blocks(merged)
+    return _sort_blocks(merged, image_size, band)
 
 
 def _paddle_result_lines(res: dict, off_x: int, off_y: int, min_conf: float) -> list[tuple[list[int], str]]:
@@ -614,7 +662,8 @@ async def _detect_page(image_path: Path, detection_cfg: dict | None = None) -> l
     # Optional PaddleOCR fill (off by default; CTD already covers full bubbles).
     if detection_cfg.get("paddle_fallback", False):
         blocks = _merge_paddle_fallback(image_path, blocks, (width, height), detection_cfg)
-    return _sort_blocks(blocks)
+    return _sort_blocks(blocks, (width, height),
+                        float(detection_cfg.get("reading_band_ratio", 0.2)))
 
 
 # ---------------------------------------------------------------------------

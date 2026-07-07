@@ -31,5 +31,6 @@ __pycache__/
 .DS_Store
 *.swp
 
-# Claude Code local
-.claude/
+# Claude Code: commit skills/commands (pull them with the repo),
+# ignore only machine-local settings
+.claude/settings.local.json

@@ -137,6 +137,11 @@ def flag_block(block: dict, cfg: dict | None = None) -> list[str]:
     cyr = len(re.findall(r"[А-Яа-яІіЇїЄєҐґ]", translation))
     if latin + cyr and latin / (latin + cyr) > c["latin_threshold"]:
         reasons.append("latin")
+    elif re.search(r"\b[A-Za-z]{3,}\b", translation):
+        # A lone untranslated Latin word inside a long Ukrainian sentence stays
+        # under the ratio threshold ("ДЕМОНІЧНА КНИГА SPTRCT", "6LORY LITY") but
+        # renders half-translated and the TTS reads it as transliterated mush.
+        reasons.append("latin")
 
     if _has_letters(original) and len(re.sub(r"\s", "", original)) >= c["len_check_min_chars"]:
         ratio = len(translation) / max(1, len(original))

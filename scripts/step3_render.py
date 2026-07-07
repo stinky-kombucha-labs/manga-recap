@@ -181,10 +181,18 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
         for page in pages:
             idx = page["page_num"]
             audio_path = audio_dir / f"{idx:04d}.wav"
-            narration = " ".join(
-                b["translation"].strip() for b in page["blocks"]
-                if b.get("translation", "").strip()
-            )
+            # Join blocks into one narration string; make sure each block ends
+            # with terminal punctuation, otherwise the TTS runs neighbouring
+            # bubbles into one breathless sentence.
+            parts = []
+            for b in page["blocks"]:
+                t = (b.get("translation") or "").strip()
+                if not t:
+                    continue
+                if t[-1] not in ".!?…:;,—-»›\"'":
+                    t += "."
+                parts.append(t)
+            narration = " ".join(parts)
             cache_key = str(idx)
             sig = hashlib.sha256(narration.encode("utf-8")).hexdigest() if narration else ""
 
@@ -227,13 +235,26 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
         print(f"\n  Encode cached: {out_path}")
         return out_path
     print(f"\n  Encoding 4K MP4...")
-    _encode_4k(page_entries, out_path, page_duration_min, video_cfg.get("crf", 18))
+    _encode_4k(page_entries, out_path, page_duration_min, video_cfg.get("crf", 18),
+               encoder=video_cfg.get("encoder", "libx264"))
     print(f"  -> {out_path}")
     print(f"  Size: {out_path.stat().st_size / 1024 / 1024:.1f} MB")
     return out_path
 
 
-def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: int) -> None:
+def _video_codec_args(encoder: str, crf: int) -> list[str]:
+    if encoder == "h264_nvenc":
+        # GPU encode — frees the CPU (libx264 pegged all cores on 4K stills).
+        # Output is standard 3840×2160, which NVENC handles fine; the old
+        # "NVENC fails" note was about encoding at the odd source resolution.
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr",
+                "-cq", str(crf), "-b:v", "0", "-profile:v", "high"]
+    return ["-c:v", "libx264", "-preset", "fast", "-tune", "stillimage",
+            "-crf", str(crf), "-profile:v", "high", "-level", "5.2"]
+
+
+def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: int,
+               encoder: str = "libx264") -> None:
     # Scale page to fit TARGET_H (2160), keep aspect ratio, pad width to TARGET_W (3840)
     vf = (
         f"scale=-2:{TARGET_H},"
@@ -256,22 +277,36 @@ def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: i
                 _silence_wav(audio, dur)
 
             seg = tmp_dir / f"seg_{i:04d}.mp4"
-            cmd = [
-                "ffmpeg", "-hide_banner", "-y",
-                "-loop", "1", "-framerate", "1",
-                "-i", str(img),
-                "-i", str(audio),
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-t", f"{dur:.3f}",
-                "-vf", vf,
-                "-c:v", "libx264", "-preset", "fast", "-crf", str(crf),
-                "-profile:v", "high", "-level", "5.2",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "384k",
-                "-shortest",
-                str(seg),
-            ]
-            subprocess.run(cmd, check=True, capture_output=True)
+
+            def _cmd(codec_args: list[str]) -> list[str]:
+                return [
+                    "ffmpeg", "-hide_banner", "-y",
+                    "-loop", "1", "-framerate", "1",
+                    "-i", str(img),
+                    "-i", str(audio),
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-t", f"{dur:.3f}",
+                    "-vf", vf,
+                    *codec_args,
+                    "-pix_fmt", "yuv420p",
+                    # YouTube-friendly audio: normalize to -14 LUFS (what YT
+                    # targets, avoids clipped peaks), resample the 22.05 kHz
+                    # mono TTS to 48 kHz.
+                    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                    "-ar", "48000",
+                    "-c:a", "aac", "-b:a", "384k",
+                    "-shortest",
+                    str(seg),
+                ]
+
+            try:
+                subprocess.run(_cmd(_video_codec_args(encoder, crf)), check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                if encoder == "libx264":
+                    raise
+                # NVENC unavailable/failed on this box — fall back to CPU x264.
+                print(f"    ({encoder} failed, falling back to libx264)")
+                subprocess.run(_cmd(_video_codec_args("libx264", crf)), check=True, capture_output=True)
             segs.append(seg)
 
         concat = tmp_dir / "concat.txt"
@@ -281,6 +316,7 @@ def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: i
             "-f", "concat", "-safe", "0",
             "-i", str(concat),
             "-c", "copy",
+            "-movflags", "+faststart",
             str(out_path),
         ], check=True, capture_output=True)
 

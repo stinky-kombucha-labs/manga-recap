@@ -6,13 +6,14 @@
     "total_chapters": 959
   },
   "run": {
-    "chapters": "2-3",
+    "chapters": "1-3",
     "output_dir": "video_output"
   },
   "video": {
     "fps": 24,
     "page_duration_min": 5,
-    "crf": 18
+    "crf": 18,
+    "encoder": "h264_nvenc"
   },
   "detection": {
     "paddle_fallback": false,
@@ -25,7 +26,7 @@
     "paddle_min_confidence": 0.64,
     "fallback_duplicate_iou": 0.18,
     "min_block_area": 24,
-    "max_block_area_ratio": 0.20
+    "max_block_area_ratio": 0.2
   },
   "render": {
     "bg_mode": "lama",
@@ -35,7 +36,7 @@
     "detect_extent": false,
     "justify": false,
     "line_spacing": 1.35,
-    "stroke_ratio": 0.10,
+    "stroke_ratio": 0.1,
     "stroke_width": 7,
     "font_max": 61,
     "font_min": 12,

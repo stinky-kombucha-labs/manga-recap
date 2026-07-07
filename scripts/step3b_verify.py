@@ -97,7 +97,9 @@ def verify_chapter(chapter_num: int, cfg: dict, min_conf: float = 0.6,
                 # Deliberately left as art (blanked SFX) — English stays by design.
                 art_boxes.extend(boxes)
 
-        result = ocr.predict(np.array(Image.open(img_path).convert("RGB")))
+        page_img = Image.open(img_path).convert("RGB")
+        page_h = page_img.size[1]
+        result = ocr.predict(np.array(page_img))
         leaks, intentional = [], []
         if result:
             for bb, text in _paddle_result_lines(result[0], 0, 0, min_conf):
@@ -115,9 +117,14 @@ def verify_chapter(chapter_num: int, cfg: dict, min_conf: float = 0.6,
         # --fix: junk-looking leaks become noise blocks in translations.json, so
         # the next render pass inpaints them. Real-text leaks are only reported.
         if fix and leaks:
+            # A leak wholly inside the top/bottom margin strip is junk even when
+            # its text matches no pattern (garbled site logos: "AGORGON" ←
+            # ac.qq.com) — story text never fits entirely in that strip.
+            strip = max(40, int(page_h * 0.05))
             fixed_here = []
             for leak in leaks:
-                if not _is_noise_text(leak["text"]):
+                in_margin = leak["bbox"][3] <= strip or leak["bbox"][1] >= page_h - strip
+                if not (_is_noise_text(leak["text"]) or in_margin):
                     continue
                 blocks = page.setdefault("blocks", [])
                 pad = 8
