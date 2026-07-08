@@ -34,3 +34,6 @@ __pycache__/
 # Claude Code: commit skills/commands (pull them with the repo),
 # ignore only machine-local settings
 .claude/settings.local.json
+
+# Night-run logs
+logs/

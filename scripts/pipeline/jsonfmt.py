@@ -15,6 +15,7 @@ Standard JSON either way — `json.loads` reads it back unchanged.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -58,4 +59,9 @@ def dumps(data: dict) -> str:
 
 
 def write(path: Path, data: dict) -> None:
-    Path(path).write_text(dumps(data) + "\n", encoding="utf-8")
+    """Atomic write: a Ctrl+C / power cut mid-write must never leave a
+    truncated translations.json (it is the source of truth for the chapter)."""
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(dumps(data) + "\n", encoding="utf-8")
+    os.replace(tmp, path)

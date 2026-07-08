@@ -15,6 +15,13 @@ recurring term or name during review, append it here.
 | Chen Yue | Чень Юе |
 | Lu Piao | Лу Пяо |
 | Du Ze | Ду Цзе |
+| Xiao Ning'er | Сяо Нін'ер |
+| Chen Linjian | Чень Лінцзянь |
+| Shen Yue | Шень Юе |
+| Ye Sheng | Є Шен |
+| Yang Xin | Ян Сінь |
+| Hu Yan | Ху Янь |
+| Wei Nan | Вей Нань |
 | Sage Emperor | Мудрий Імператор |
 
 ## Terms
@@ -29,6 +36,7 @@ recurring term or name during review, append it here.
 | Bronze/Silver/Gold/Black Gold/Legend rank | Бронзовий/Срібний/Золотий/Чорнозолотий/Легендарний ранг |
 | demon spirit | демонічний дух |
 | demon beast | демонічний звір |
+| soul sea | море душі |
 | Snow Wind Demon Beasts | Снігові Вітряні Демонічні Звірі |
 | Temporal Demon Spirit Book | Книга Демонічного Духу Часу |
 | St. Ancestral Mountains | гори Святого Предка |
@@ -37,6 +45,16 @@ recurring term or name during review, append it here.
 | Age of Darkness | Епоха Темряви |
 | Holy Orchid Institute | Інститут Святої Орхідеї |
 | Scarlet Flaming Fox | Багряна Вогняна Лисиця |
+| Heavenly Marks Family | родина Небесних Знаків |
+| Sacred Family / God Saint Family | Священна родина |
+| Sacred Empire | Священна імперія |
+| Snow Wind Empire | імперія Снігового Вітру |
+| Heavenly God Technique / Tactics | техніка Небесного Бога |
+| Purple Mist Grass | трава Пурпурового Туману |
+| Black Pool Grass | трава Чорного Ставу |
+| Zoysia Grass | трава Зойсія |
+| Fox Bear | лисоведмідь |
+| Snow Sakura Demon Spirit | демонічний дух Снігової Сакури |
 | Tales of Demons and Gods (title) | Оповіді про демонів і богів |
 
 ## Russism blacklist (LLM output regularly contains these — always fix)

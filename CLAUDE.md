@@ -26,9 +26,21 @@ the Claude pass over each `review_todo.json` (see step 2c) — re-run
 step2/step2b batch ALL chapters into one worker call (one GGUF load per run,
 not per chapter). step3 also skips re-encoding when no page/audio changed.
 
-**Batch flow for many chapters:** set `run.chapters` (e.g. "4-23") → run
-`run_pipeline.py` (no AI needed, GPU-bound) → then `/review-batch` in a Claude
-Code session (.claude/commands/review-batch.md) reviews every chapter's
+**Night batch (preferred for scale): `./run_night.sh`** — set `run.chapters`
+(e.g. "51-70"), launch, leave overnight. Order: prep (step1→2→2b) → backup →
+translation-memory pre-pass (`night_tools.py tm-apply` fills recurring blocks
+from `.claude/skills/review-batch/tm.json`, ~44% on batch 1-50) → AI review of
+the residue (JSON edits only; provider from `config.json → review.provider`:
+`"codex"` (default) / `"claude"` / `"none"`; an AI failure does NOT stop the
+night — render proceeds, re-run the script later to catch up the review) →
+single render+TTS+encode → verify `--fix` loop (capped at
+`review.max_fix_loops`) → `tm-harvest` learns this batch's decisions →
+summary. Stop/resume safe: stage markers in `temp/.night_state_*`, atomic
+writes everywhere; re-run the same command to continue. Never put
+already-reviewed chapters back into `run.chapters`.
+
+**Day flow (small batches / watch immediately):** `run_pipeline.py` renders
+first, then `/review-batch` in a Claude Code session reviews every chapter's
 review_todo.json, applies fixes, re-renders and verifies. After review never
 re-run step1/step2 for those chapters.
 
@@ -136,6 +148,46 @@ empty.
 }
 ```
 
+## Starting a NEW manga / novel (checklist)
+
+The pipeline is novel-agnostic, but four assets are PER-NOVEL and must be
+reset — otherwise the new title inherits TDG terminology and phrases:
+
+1. **Input pages**: `input/<new-folder>/chapter-XXXXX/*.png` (upscaled). Page
+   order comes from the LAST number before the extension
+   (`step1_extract.py::_manga_page_number`, e.g. `...-2-13.png` = page 13) —
+   if the new source names pages differently, adapt that function first and
+   verify on one chapter.
+2. **config.json**: `novel.name/folder/source_dir/total_chapters`;
+   `run.chapters: "1-2"` for the pilot; `translation.glossary` — replace the
+   TDG title entry with the new title's fixed translation(s).
+3. **Per-novel dictionaries** (archive the old ones, start fresh):
+   - `.claude/skills/review-batch/terminology.md` → rename to
+     `terminology-tales-of-demons.md` for the archive, start a new
+     terminology.md (names/terms table empty, KEEP the russism blacklist and
+     register notes — they are language-wide, not novel-specific);
+   - `.claude/skills/review-batch/tm.json` → archive alongside and start
+     empty (`{}`) — translation memory must not leak phrases across novels.
+4. **Pilot run**: `./run_night.sh` on chapters 1-2, then EYEBALL the rendered
+   pages and `render_qa.json`. Expected new-title issues, in order of
+   likelihood:
+   - new scanlator watermarks/URLs → add to `_WATERMARK_TEXTS` / noise
+     patterns in `scripts/step1_extract.py`;
+   - a stylized cover/title logo OCR can't read → add a `translation.glossary`
+     entry (fuzzy-matched) or a manual block (see ch1 cover precedent);
+   - different SFX/lettering style → check `flag.py` still catches leftovers.
+5. **Reading direction**: `_sort_blocks` reads columns LEFT→RIGHT (this is a
+   Chinese manhua convention). A Japanese manga reads RIGHT→LEFT — that needs
+   a `detection.reading_direction` option in `_sort_blocks` (not implemented
+   yet; ask the AI to add it before processing a Japanese title).
+6. **Source language**: OCR stack (ocr48px + PaddleOCR `lang="en"`) assumes
+   ENGLISH source text. A non-English source needs different OCR models —
+   bigger change, plan separately.
+7. Scale up only after the pilot passes: batches of 15-20 chapters per night.
+
+`temp/`, `video_output/`, caches and backups are already namespaced by
+`novel.folder` — multiple novels coexist without conflicts.
+
 ## Project layout
 
 ```
@@ -189,6 +241,7 @@ video_output/
 - **`pipeline/render.py`** — background clean (`bg_mode`: `lama` default / `blur` fallback) + Anime Ace stroke text. Glyph-match fit (`english_glyph_height` → font capped to English size), width+height fit incl. stroke, centered lines (`justify` default false), optional `detect_extent` to catch OCR-missed continuation lines. `render_page` plans each block (`_plan_blocks`) then cleans + renders.
 - **`scripts/demo_detect_translate_render.py`** — all-in-one reference: CTD detect → OCR → translate → `merge_into_bubbles` → clean all lines → glyph-match render → `image_output/`. This is the confirmed code shape to fold into step1/step2.
 - **`scripts/step3b_verify.py`** — post-render QA: PaddleOCRs every rendered page and reports leftover English lines (`render_qa.json`, exit 2 on leaks). Lines inside rendered blocks are ignored (the English OCR model reads our Ukrainian as garbled Latin — only text OUTSIDE story blocks / inside noise boxes can be a real leak). Distinguishes real leaks from blocks intentionally left as art (blanked SFX). `--fix` closes the loop: junk leaks become noise blocks → re-run step3 → verify clean. Replaces eyeballing 959 chapters.
+- **`scripts/night_tools.py`** — run_night.sh stages: `backup` (translations.json → backups/), `tm-apply` / `tm-harvest` (translation memory in `.claude/skills/review-batch/tm.json`: recurring originals decided once by a past review get applied by script — only replacement/blank decisions are memorized, noise is position-dependent and never stored), `summary` (per-chapter table). All operate on `run.chapters`.
 - **`pipeline/tts.py`** — Calls `tts_worker.py` via subprocess with `cwd=/home/user/PycharmProjects/tts/` (model files are relative). Uses Oleksa voice.
 - **`pipeline/encode.py`** — `framerate=1` still-image segments + FFmpeg concat → 4K portrait MP4.
 

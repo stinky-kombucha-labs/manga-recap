@@ -314,14 +314,19 @@ def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: i
 
         concat = tmp_dir / "concat.txt"
         concat.write_text("".join(f"file '{s}'\n" for s in segs))
+        # Concat into a temp name and rename on success: an interrupted concat
+        # must not leave a broken MP4 that the encode-skip check (mtime-based)
+        # would later treat as up to date.
+        partial = out_path.with_suffix(".mp4.tmp")
         subprocess.run([
             "ffmpeg", "-hide_banner", "-y",
             "-f", "concat", "-safe", "0",
             "-i", str(concat),
             "-c", "copy",
             "-movflags", "+faststart",
-            str(out_path),
+            str(partial),
         ], check=True, capture_output=True)
+        partial.replace(out_path)
 
 
 def main():
