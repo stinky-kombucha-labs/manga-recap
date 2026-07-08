@@ -100,7 +100,7 @@ def verify_chapter(chapter_num: int, cfg: dict, min_conf: float = 0.6,
         page_img = Image.open(img_path).convert("RGB")
         page_h = page_img.size[1]
         result = ocr.predict(np.array(page_img))
-        leaks, intentional = [], []
+        leaks, intentional, sfx_art = [], [], []
         if result:
             for bb, text in _paddle_result_lines(result[0], 0, 0, min_conf):
                 if not _looks_english(text):
@@ -111,6 +111,12 @@ def verify_chapter(chapter_num: int, cfg: dict, min_conf: float = 0.6,
                 entry = {"text": text, "bbox": bb}
                 if any(_center_in(ab, cx, cy, pad=24) for ab in art_boxes):
                     intentional.append(entry)
+                elif (len(text.split()) <= 2
+                        and sum(1 for ch in text if ch.isalnum()) <= 14):
+                    # Short SFX-ish word the detector never boxed ("STEP",
+                    # "NODS", "BANG") — stays as art by design; report it
+                    # separately so real leaks stand out.
+                    sfx_art.append(entry)
                 else:
                     leaks.append(entry)
 
@@ -145,8 +151,12 @@ def verify_chapter(chapter_num: int, cfg: dict, min_conf: float = 0.6,
 
         report["leaks"] += len(leaks)
         report["intentional"] += len(intentional)
-        report["pages"].append({"page_num": idx, "leaks": leaks, "intentional": intentional})
+        report["sfx_art"] = report.get("sfx_art", 0) + len(sfx_art)
+        report["pages"].append({"page_num": idx, "leaks": leaks,
+                                "intentional": intentional, "sfx_art": sfx_art})
         status = "OK" if not leaks else f"{len(leaks)} LEAK(S): " + "; ".join(l["text"] for l in leaks[:3])
+        if sfx_art and not leaks:
+            status += f"  ({len(sfx_art)} sfx-as-art)"
         print(f"  [{idx:>3}] {status}")
 
     if fix and report.get("fixed"):

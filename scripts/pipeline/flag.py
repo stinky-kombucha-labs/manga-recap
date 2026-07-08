@@ -25,12 +25,26 @@ _EXPLANATION_PATTERNS = [
     r"перекла[дст]\w*\s.*(українськ|англійськ|мов[аоую])",
     r"перекладається\s+як",
     r"мовою\s+це\s+буде",
-    r"це\s+абревіатур",
+    r"абревіатур",
     r"розшифров",
-    r"набір\s+(випадкових|літер)",
-    r"не\s+має\s+(конкретного\s+)?значенн",
+    r"зашифрован",
+    r"набір\s+(випадкових|літер|символів)",
+    r"не\s+має\s+\S*\s*значенн",
     r"у\s+цьому\s+реченні",
     r"це\s+речення\s+(англійськ|українськ|перекл)",
+    # MamayLM's "helpful assistant" walls, seen rendered onto pages:
+    # «На жаль, "d31S" не є зрозумілим…», «*   **П'ять стендів** (якщо…»,
+    # «Без контексту важко…», «будь ласка, надайте більше інформації».
+    r"\*\*",                      # markdown bold/bullets never belong in a bubble
+    r"не\s+є\s+зрозумілим",
+    r"контекст",                  # «без контексту», «залежить від контексту», «потрібен контекст»
+    r"варіант\w*\s+переклад",
+    r"не\s+можу\s+\S*\s*переклас",
+    r"переклад\w*\s+не\s+існує",
+    r"будь\s+ласка,\s+надайте",
+    r"серійний\s+номер",
+    r"скороченн\w*\s+від",
+    r"на\s+жаль,\s*[\"«]",
 ]
 
 # Junk that should never be a translation.
@@ -119,6 +133,11 @@ def flag_block(block: dict, cfg: dict | None = None) -> list[str]:
 
     if (any(re.search(p, translation, re.IGNORECASE) for p in _EXPLANATION_PATTERNS)
             or any(re.search(p, translation, re.IGNORECASE) for p in _HALLUCINATION_MARKERS)):
+        reasons.append("explanation")
+    elif len(translation) > 100 and len(re.sub(r"\s", "", original)) < 15:
+        # A 4-char SFX never legitimately becomes a 100+ char translation — the
+        # model wrote an essay about it. (Too-short originals dodge the normal
+        # length-ratio check, which needs len_check_min_chars of source text.)
         reasons.append("explanation")
 
     if _mixed_script(translation):

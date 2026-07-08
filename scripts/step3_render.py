@@ -291,11 +291,14 @@ def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: i
                     "-pix_fmt", "yuv420p",
                     # YouTube-friendly audio: normalize to -14 LUFS (what YT
                     # targets, avoids clipped peaks), resample the 22.05 kHz
-                    # mono TTS to 48 kHz.
-                    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+                    # mono TTS to 48 kHz. apad + -t (NOT -shortest): a sub-second
+                    # narration with -shortest ended the segment before the 1 fps
+                    # video emitted a single frame — a video-less first segment
+                    # corrupted the whole concat (ch50 came out 65 s and broken).
+                    # apad also enforces the page_duration_min promise.
+                    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,apad",
                     "-ar", "48000",
                     "-c:a", "aac", "-b:a", "384k",
-                    "-shortest",
                     str(seg),
                 ]
 

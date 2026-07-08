@@ -6,7 +6,7 @@
     "total_chapters": 959
   },
   "run": {
-    "chapters": "1-3",
+    "chapters": "1-50",
     "output_dir": "video_output"
   },
   "video": {

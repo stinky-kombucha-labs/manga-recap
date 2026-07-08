@@ -9,6 +9,26 @@ You are finishing a batch produced by `scripts/run_pipeline.py`. Everything is
 already rendered and QA-verified for leftover English; your job is ONLY the
 translation-quality pass over the small flagged lists, then a re-render.
 
+## Efficiency rules — read FIRST (violating these burns the user's usage limit)
+
+- **Do the whole review in THIS conversation. Never spawn agents, subagents,
+  parallel tasks or workflows.** All review lists of a 50-chapter batch
+  together are ~100 KB of text — they fit in one context. Fan-out multiplies
+  cost ~20× (every agent re-loads its own context) and splits the terminology
+  consistency you are here to enforce.
+- **Batch reads**: dump ALL review_todo.json files with ONE command
+  (e.g. a python loop printing chapter/page/id/reasons/original/translation).
+  Do not open files one by one.
+- **Batch writes**: apply fixes for MANY chapters with ONE python script call
+  (dict of edits → pipeline.jsonfmt.write per file). Never one tool call per
+  block.
+- **Images are the expensive part.** Open a page image ONLY when a `verify`
+  block is long story text whose meaning you genuinely cannot reconstruct
+  from the OCR. Short garble ("d31S", "5TANDS", corner logos) → blank or
+  noise WITHOUT looking. When you do look, crop to the block bbox (+margin)
+  and downscale to ~800 px before viewing — never view full 4K pages.
+- Don't re-run step1/step2/step2b, don't re-read what is already in context.
+
 ## Procedure
 
 1. Read `config.json` → `run.chapters` and expand the chapter list.
@@ -36,11 +56,20 @@ translation-quality pass over the small flagged lists, then a re-render.
    background execution and wait for completion):
    - `.venv/bin/python scripts/step3_render.py` — re-renders + re-voices only
      edited pages, re-encodes only changed chapters;
-   - `.venv/bin/python scripts/step3b_verify.py` — exit 3 → run
-     `step3_render.py` once more and verify again; exit 2 → real English
-     leaks, investigate those pages.
+   - `.venv/bin/python scripts/step3b_verify.py --fix` — exit 3 → run
+     `step3_render.py` once more and verify again (junk leaks got queued for
+     inpainting); exit 2 → real English leaks: text CTD missed entirely. For a
+     missed SENTENCE, add a block to that page in translations.json (bbox from
+     render_qa.json leak, translation by meaning) and re-run step3; short
+     SFX-as-art entries are fine to leave.
 5. Report per chapter: blocks fixed / blanked / marked noise, russisms
    corrected, and the final verify status.
+
+## Resuming a partial review
+
+An earlier interrupted run may have already fixed some blocks. If a flagged
+block's current translation already reads as natural Ukrainian and matches
+`terminology.md`, accept it silently and move on — do not re-translate.
 
 ## Hard rules
 

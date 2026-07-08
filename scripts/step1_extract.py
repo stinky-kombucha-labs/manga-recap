@@ -163,7 +163,8 @@ def _text_similarity(a: str, b: str) -> float:
 # ("mangareader.net" → "wangareadek"), so exact substring checks miss them —
 # match fuzzily on the normalized text instead.
 _WATERMARK_TEXTS = ("mangareader.net", "mangareader", "ac.qq.com",
-                    "thyaeriatranslations.com", "translations.com")
+                    "thyaeriatranslations.com", "translations.com",
+                    "readmanga.today", "readmanga", "road first")
 
 
 def _is_watermark_text(text: str) -> bool:
@@ -186,7 +187,8 @@ def _is_noise_text(text: str) -> bool:
     # text, never narrated, so drop them before they reach translations.json.
     if any(w in tl for w in ("translator", "translation:", "redraw", "redrawer", "cleaner",
                              "typesetter", "proofread", "scanlat", "uploader", "raws",
-                             "edited by", "edit:", "credits")):
+                             "edited by", "edit:", "credits",
+                             "please consider", "original source", "this series at")):
         return True
     # "Novel @ <site>" header: when the URL part is a separate box, the leftover
     # "NOVEL Q"/"NOVEL @" stub is still scanlation junk, not story text.
@@ -203,7 +205,11 @@ def _is_noise_text(text: str) -> bool:
         def _domainish(tok: str) -> bool:
             if _re.fullmatch(r"[A-Za-z0-9]{1,6}([.,/:][A-Za-z0-9]{1,6}){1,4}", tok):
                 return True
-            return bool(_re.search(r"\.(ne[ti]?|com?[a-z]?\d?|org|cav)$", tok, _re.IGNORECASE))
+            if _re.search(r"\.(ne[ti]?|com?[a-z]?\d?|org|cav|today)$", tok, _re.IGNORECASE):
+                return True
+            # Garbled READMANGA.TODAY fragments: "MOSATODAY", "EATODAY" — a
+            # single token ENDING in "today" is never dialogue ("today" alone is).
+            return bool(_re.fullmatch(r"[A-Za-z]+\.?today", tok, _re.IGNORECASE))
         if sum(1 for t in tokens if _domainish(t)) * 2 >= len(tokens):
             return True
     cjk = sum(1 for c in text if unicodedata.east_asian_width(c) in ("W", "F"))
