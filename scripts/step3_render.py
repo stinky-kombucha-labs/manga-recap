@@ -180,6 +180,11 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
             cjk = sum(1 for ch in orig if ord(ch) > 0x2E80)
             if cjk > len(orig) / 2 and area > page_area * cjk_keep_ratio:
                 continue                      # big CJK cover design — leave as art
+            if area > page_area * float(render_cfg.get("noise_max_block_ratio", 0.03)):
+                # Big noise block of ANY script (ch1 cover credits over the book
+                # art): the merged inpaint hole is too large — LaMa smudges the
+                # artwork. Keeping the junk beats destroying the art.
+                continue
             nb = dict(b)
             nb["line_bboxes"] = [lb for lb in (b.get("line_bboxes") or [])
                                  if (lb[2] - lb[0]) * (lb[3] - lb[1]) < page_area * max_line_ratio]

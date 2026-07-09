@@ -2,9 +2,10 @@
 Panel-by-panel video fragments (the "smartC" recap style).
 
 Given a RENDERED page and its blocks, produce the ordered list of fragments to
-show: a brief whole-page establisher, then panel crops (white-gutter panel
-detection); where contiguous artwork defeats panel detection (a merged region
-covering >45% of the page), fall back to a SMART 16:9 window per text block —
+show: panel crops in reading order (white-gutter panel detection); pages with
+NO panel division are shown whole; where contiguous artwork defeats panel
+detection (a merged region covering >45% of the page), fall back to a SMART
+16:9 window per text block —
 the window must contain the bubble but is placed to maximise artwork inside and
 to avoid slicing art at the frame edges, so characters end up whole in frame
 and the bubble sits off-centre.
@@ -123,6 +124,16 @@ def _smart_window(bbox, W, H, integral):
     return [wx, wy, wx + win_w, wy + win_h]
 
 
+def _expand_box(box, W, H, factor: float):
+    """Zoom OUT: grow the fragment window by `factor` around its centre (more
+    surrounding context in frame), clamped to the page."""
+    x1, y1, x2, y2 = box
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    w, h = (x2 - x1) * factor, (y2 - y1) * factor
+    return [max(0, int(cx - w / 2)), max(0, int(cy - h / 2)),
+            min(W, int(cx + w / 2)), min(H, int(cy + h / 2))]
+
+
 def _narration(blocks: list[dict]) -> str:
     parts = []
     for b in blocks:
@@ -135,6 +146,34 @@ def _narration(blocks: list[dict]) -> str:
     return " ".join(parts)
 
 
+def _merge_similar(frags: list[dict], W: int, H: int, iou_thr: float) -> list[dict]:
+    """Consecutive fragments whose windows are near-identical (two bubbles in
+    the same art region → smart windows shifted by a few %) read as jittery
+    re-cuts of the same picture. Merge them: one window, joined narration."""
+    def iou(a, b):
+        ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+        inter = ix * iy
+        if inter <= 0:
+            return 0.0
+        ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+        return inter / ua
+
+    out: list[dict] = []
+    for f in frags:
+        if out and iou(out[-1]["box"], f["box"]) >= iou_thr:
+            prev = out[-1]
+            prev["box"] = [max(0, min(prev["box"][0], f["box"][0])),
+                           max(0, min(prev["box"][1], f["box"][1])),
+                           min(W, max(prev["box"][2], f["box"][2])),
+                           min(H, max(prev["box"][3], f["box"][3]))]
+            prev["text"] = " ".join(t for t in (prev["text"], f["text"]) if t.strip())
+            prev["min_dur"] = max(prev["min_dur"], f["min_dur"])
+        else:
+            out.append(dict(f))
+    return out
+
+
 def page_fragments(page: dict, img: Image.Image, is_cover: bool = False,
                    cfg: dict | None = None) -> list[dict]:
     """Ordered fragments for one page: [{box, text, min_dur}, ...]."""
@@ -144,12 +183,25 @@ def page_fragments(page: dict, img: Image.Image, is_cover: bool = False,
         return [{"box": [0, 0, W, H], "text": _narration(page["blocks"]),
                  "min_dur": float(cfg.get("cover_min_dur", 4.0))}]
 
-    est_dur = float(cfg.get("establisher_dur", 1.8))
     text_dur = float(cfg.get("fragment_min_dur", 2.6))
     art_dur = float(cfg.get("art_fragment_dur", 2.0))
 
+    zoom_out = float(cfg.get("fragment_zoom_out", 1.3))
     panels = detect_panels(img)
     blocks = [b for b in page["blocks"] if (b.get("translation") or "").strip()]
+
+    # A page WITHOUT panel division: still fragment it — smart windows per text
+    # block (only the cover is ever whole). A textless art page is the single
+    # exception (nothing to anchor fragments to).
+    if len(panels) == 1 and not blocks:
+        return [{"box": [0, 0, W, H], "text": "", "min_dur": art_dur}]
+    if len(panels) == 1:
+        integral = _ink_integral(img)
+        frags = [{"box": _expand_box(_smart_window(b["bbox"], W, H, integral), W, H, zoom_out),
+                  "text": _narration([b]), "min_dur": text_dur}
+                 for b in blocks]
+        return _merge_similar(frags, W, H, float(cfg.get("fragment_merge_iou", 0.65)))
+
     integral = None
 
     def owner(b):
@@ -165,7 +217,9 @@ def page_fragments(page: dict, img: Image.Image, is_cover: bool = False,
     for b in blocks:
         per_panel.setdefault(owner(b), []).append(b)
 
-    frags = [{"box": [0, 0, W, H], "text": "", "min_dur": est_dur}]
+    # No whole-page "establisher" shot: only the cover is ever shown whole —
+    # regular pages go straight to their fragments.
+    frags: list[dict] = []
     for i, p in enumerate(panels):
         blks = per_panel.get(i, [])
         area_ratio = (p[2] - p[0]) * (p[3] - p[1]) / (W * H)
@@ -173,13 +227,13 @@ def page_fragments(page: dict, img: Image.Image, is_cover: bool = False,
             if integral is None:
                 integral = _ink_integral(img)
             for b in blks:
-                frags.append({"box": _smart_window(b["bbox"], W, H, integral),
+                frags.append({"box": _expand_box(_smart_window(b["bbox"], W, H, integral),
+                                                 W, H, zoom_out),
                               "text": _narration([b]), "min_dur": text_dur})
         elif area_ratio > 0.9 and not blks:
             continue          # textless full-page "panel" duplicates the establisher
         else:
-            pad = 20
-            box = [max(0, p[0]-pad), max(0, p[1]-pad), min(W, p[2]+pad), min(H, p[3]+pad)]
+            box = _expand_box(p, W, H, zoom_out)
             frags.append({"box": box, "text": _narration(blks),
                           "min_dur": text_dur if blks else art_dur})
-    return frags
+    return _merge_similar(frags, W, H, float(cfg.get("fragment_merge_iou", 0.65)))
