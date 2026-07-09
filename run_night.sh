@@ -76,13 +76,28 @@ run_review() {
     log "АІ-ревю через: $cmd"
     eval "$cmd \"\$(cat scripts/prompt_review.txt)\""
 }
+# При падінні (вичерпаний ліміт codex) — ЧЕКАЄМО і пробуємо знову, на інший
+# провайдер НЕ переходимо. Лише після всіх спроб ніч продовжується без ревю.
 if [ -f "$STATE" ] && grep -qx review "$STATE"; then
     log "SKIP review (вже виконано)"
-elif run_review; then
-    echo review >> "$STATE"
 else
-    REVIEW_FAILED=1
-    log "!!! АІ-ревю не завершилось — продовжую БЕЗ нього (рендер піде з поточними перекладами; ревю можна догнати вдень: перезапусти скрипт — виконається лише ревю і точковий дорендер)"
+    ATTEMPTS=$(cfg "['review'].get('max_review_attempts',6)")
+    WAIT_MIN=$(cfg "['review'].get('retry_wait_minutes',60)")
+    review_ok=0
+    for attempt in $(seq 1 "$ATTEMPTS"); do
+        log "АІ-ревю: спроба $attempt/$ATTEMPTS (provider=$PROVIDER)"
+        if run_review; then review_ok=1; break; fi
+        if [ "$attempt" -lt "$ATTEMPTS" ]; then
+            log "ревю не вдалося (ліміт?) — чекаю ${WAIT_MIN} хв і повторюю тим САМИМ провайдером"
+            sleep $((WAIT_MIN * 60))
+        fi
+    done
+    if [ $review_ok -eq 1 ]; then
+        echo review >> "$STATE"
+    else
+        REVIEW_FAILED=1
+        log "!!! АІ-ревю не завершилось після $ATTEMPTS спроб — продовжую БЕЗ нього (рендер піде з поточними перекладами; перезапусти скрипт пізніше — виконається лише ревю і точковий дорендер)"
+    fi
 fi
 
 # --- 4. Рендер + озвучка + енкод (кеші самі пропустять готове) ----------------

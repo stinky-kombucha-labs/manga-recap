@@ -261,6 +261,18 @@ page's blocks with `_sort_blocks`, reassign ids, re-stamp
 `rendered/.render_cache.json` with fresh `_page_render_signature`s (renders
 are order-independent) — then step3 only re-voices and re-encodes.
 
+## Video modes (`config.json → video.mode`)
+
+- `"panels"` (default since 2026-07-09, the "smartC" recap style) — page shown
+  whole ~1.8 s, then PANEL crops in reading order, each narrated separately;
+  merged mega-panels fall back to smart 16:9 block windows (art-seeking
+  placement: interior ink rewarded, frame-edge ink penalised — characters stay
+  whole, bubble sits off-centre). Cover = whole page. Logic in
+  `pipeline/panels.py`; fragment TTS cached in `audio/.frag_audio_cache.json`
+  (keys page*100+idx). Tunables: `video.fragment_min_dur` (2.6),
+  `art_fragment_dur` (2.0), `establisher_dur` (1.8), `cover_min_dur` (4.0).
+- `"pages"` — the old one-static-page-per-shot format.
+
 ## 4K output format
 
 - **Resolution:** 3840×2160 (16:9 landscape) — manga page scaled to fit height 2160, pillarboxed to 3840 wide with black bars

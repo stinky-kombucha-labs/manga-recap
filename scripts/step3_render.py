@@ -151,8 +151,40 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
         # Blocks with a translation get cleaned + typeset; noise blocks (scanlation
         # credits/URLs/watermarks) get cleaned only — the box is inpainted and left
         # empty, so the junk disappears from the video.
-        render_blocks = [b for b in blocks
-                         if b.get("translation", "").strip() or b.get("noise")]
+        #
+        # Guards against destroying artwork (ch48 cover: a 40%-page CJK
+        # calligraphy+credits block got LaMa-wiped): CJK-majority noise bigger
+        # than ~2% of the page is cover DESIGN — keep it as art; and любий noise
+        # line box bigger than noise_max_line_ratio is never worth erasing
+        # (leaving junk beats hallucinating half a page).
+        page_area = None
+        max_line_ratio = float(render_cfg.get("noise_max_line_ratio", 0.04))
+        cjk_keep_ratio = float(render_cfg.get("noise_cjk_keep_ratio", 0.02))
+        render_blocks = []
+        for b in blocks:
+            if b.get("translation", "").strip():
+                render_blocks.append(b)
+                continue
+            if not b.get("noise"):
+                continue
+            if page_area is None:
+                try:
+                    from PIL import Image as _Img
+                    _w, _h = _Img.open(src_page).size
+                    page_area = _w * _h
+                except Exception:
+                    page_area = 2912 * 4120
+            bb = b.get("bbox") or [0, 0, 0, 0]
+            area = (bb[2] - bb[0]) * (bb[3] - bb[1])
+            orig = b.get("original") or ""
+            cjk = sum(1 for ch in orig if ord(ch) > 0x2E80)
+            if cjk > len(orig) / 2 and area > page_area * cjk_keep_ratio:
+                continue                      # big CJK cover design — leave as art
+            nb = dict(b)
+            nb["line_bboxes"] = [lb for lb in (b.get("line_bboxes") or [])
+                                 if (lb[2] - lb[0]) * (lb[3] - lb[1]) < page_area * max_line_ratio]
+            if nb["line_bboxes"]:
+                render_blocks.append(nb)
         signature = _page_render_signature(page, src_page, render_cfg)
         cache_key = str(idx)
         cache_hit = rendered.exists() and render_cache.get(cache_key) == signature
@@ -169,6 +201,11 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
             "audio": audio_dir / f"{idx:04d}.wav",
             "idx": idx,
         })
+
+    # --- Panel mode: fragment-level TTS + fragment video (smartC style) ---
+    if str(video_cfg.get("mode", "pages")).lower() == "panels":
+        return _assemble_panels(chapter_num, pages, rendered_dir, audio_dir, out_dir,
+                                video_cfg, tts_python, tts_enabled, force_render)
 
     # --- Batch TTS (one subprocess for all pages — model loads once) ---
     if tts_enabled:
@@ -240,6 +277,112 @@ def render_chapter(chapter_num: int, cfg: dict, skip_tts: bool = False, force_re
     print(f"  -> {out_path}")
     print(f"  Size: {out_path.stat().st_size / 1024 / 1024:.1f} MB")
     return out_path
+
+
+def _assemble_panels(chapter_num: int, pages: list[dict], rendered_dir: Path,
+                     audio_dir: Path, out_dir: Path, video_cfg: dict,
+                     tts_python: str, tts_enabled: bool, force_render: bool) -> Path:
+    """video.mode = "panels": show page fragments (panels / smart block windows)
+    in reading order, each narrated separately. Fragment audio is cached by
+    text hash in .frag_audio_cache.json (keys page*100+idx, so wavs coexist
+    with page-mode 0001.wav files)."""
+    from PIL import Image
+    from pipeline.panels import page_fragments
+
+    cache_path = audio_dir / ".frag_audio_cache.json"
+    cache = _load_json(cache_path, {})
+    frag_entries, texts = [], {}
+    for page in pages:
+        idx = page["page_num"]
+        rp = rendered_dir / f"{idx:04d}.png"
+        if not rp.exists():
+            continue
+        img = Image.open(rp).convert("RGB")
+        # Page 1 is a COVER (shown whole) only when it carries a couple of
+        # title-ish blocks; 16 of the first 100 chapters open straight with
+        # story panels — those must be fragmented like any other page.
+        n_spoken = sum(1 for b in page["blocks"] if (b.get("translation") or "").strip())
+        is_cover = idx == 1 and n_spoken <= int(video_cfg.get("cover_max_blocks", 3))
+        for j, f in enumerate(page_fragments(page, img, is_cover=is_cover, cfg=video_cfg)):
+            key = idx * 100 + j
+            has_text = bool(f["text"].strip())
+            wav = audio_dir / f"{key:04d}.wav"
+            if has_text and tts_enabled:
+                sig = hashlib.sha256(f["text"].encode("utf-8")).hexdigest()
+                if not (wav.exists() and cache.get(str(key)) == sig):
+                    texts[key] = f["text"]
+                    cache[str(key)] = sig
+            frag_entries.append({"image": rp, "box": f["box"], "key": key,
+                                 "audio": wav if has_text else None,
+                                 "min_dur": f["min_dur"]})
+    _write_json(cache_path, cache)
+
+    if texts and tts_enabled:
+        import torch, gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"\n  TTS: {len(texts)} fragment(s) via Oleksa (batch)...")
+        generate_chapter_audio(texts, audio_dir, tts_python)
+    for e in frag_entries:
+        if e["audio"] is not None and not e["audio"].exists():
+            e["audio"] = None
+
+    out_path = out_dir / f"{chapter_dir_name(chapter_num)}.mp4"
+    inputs = [e["image"] for e in frag_entries] + [e["audio"] for e in frag_entries if e["audio"]]
+    if (not force_render and out_path.exists() and all(p.exists() for p in inputs)
+            and all(out_path.stat().st_mtime_ns > p.stat().st_mtime_ns for p in set(inputs))):
+        print(f"\n  Encode cached: {out_path}")
+        return out_path
+    print(f"\n  Encoding 4K MP4 ({len(frag_entries)} fragments)...")
+    _encode_fragments(frag_entries, out_path, video_cfg.get("crf", 18),
+                      encoder=video_cfg.get("encoder", "libx264"))
+    print(f"  -> {out_path}")
+    print(f"  Size: {out_path.stat().st_size / 1024 / 1024:.1f} MB")
+    return out_path
+
+
+def _encode_fragments(frag_entries: list[dict], out_path: Path, crf: int,
+                      encoder: str = "libx264") -> None:
+    from PIL import Image
+    vf = (f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+          f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2:black")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        segs = []
+        for e in frag_entries:
+            crop_p = tmp_dir / f"crop_{e['key']:05d}.png"
+            Image.open(e["image"]).convert("RGB").crop(e["box"]).save(crop_p)
+            wav = e["audio"]
+            dur = max(e["min_dur"], _wav_duration(wav) + 0.4) if wav else e["min_dur"]
+            seg = tmp_dir / f"seg_{e['key']:05d}.mp4"
+
+            def _cmd(codec_args):
+                c = ["ffmpeg", "-hide_banner", "-y", "-loop", "1", "-framerate", "1",
+                     "-i", str(crop_p)]
+                if wav:
+                    c += ["-i", str(wav), "-map", "0:v:0", "-map", "1:a:0",
+                          "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,apad", "-ar", "48000",
+                          "-c:a", "aac", "-b:a", "384k"]
+                else:
+                    c += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+                          "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "384k"]
+                return c + ["-t", f"{dur:.3f}", "-vf", vf, *codec_args,
+                            "-pix_fmt", "yuv420p", str(seg)]
+
+            if subprocess.run(_cmd(_video_codec_args(encoder, crf)),
+                              capture_output=True).returncode != 0:
+                subprocess.run(_cmd(_video_codec_args("libx264", crf)),
+                               check=True, capture_output=True)
+            segs.append(seg)
+
+        concat = tmp_dir / "concat.txt"
+        concat.write_text("".join(f"file '{s}'\n" for s in segs))
+        partial = out_path.with_suffix(".mp4.tmp")
+        subprocess.run(["ffmpeg", "-hide_banner", "-y", "-f", "concat", "-safe", "0",
+                        "-i", str(concat), "-c", "copy", "-movflags", "+faststart",
+                        "-f", "mp4", str(partial)], check=True, capture_output=True)
+        partial.replace(out_path)
 
 
 def _video_codec_args(encoder: str, crf: int) -> list[str]:
@@ -324,6 +467,7 @@ def _encode_4k(page_entries: list[dict], out_path: Path, page_min: float, crf: i
             "-i", str(concat),
             "-c", "copy",
             "-movflags", "+faststart",
+            "-f", "mp4",
             str(partial),
         ], check=True, capture_output=True)
         partial.replace(out_path)

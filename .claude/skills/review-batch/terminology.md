@@ -56,6 +56,24 @@ recurring term or name during review, append it here.
 | Fox Bear | лисоведмідь |
 | Snow Sakura Demon Spirit | демонічний дух Снігової Сакури |
 | Tales of Demons and Gods (title) | Оповіді про демонів і богів |
+| Alchemist Association | Асоціація алхіміків |
+| Dark Guild | Темна гільдія |
+| Ancient Orchid City | Давнє Місто Орхідей |
+| Shadow Devil | Тіньовий Диявол |
+| Kong Ming | Конг Мін |
+| Gu Yan | Гу Янь |
+| Yang Xin / Director Yang | Ян Сінь / директорка Ян |
+| Hu Yan Lanruo | Ху Янь Ланьжо |
+| Nie Yu | Ні Ю |
+| Shen Fei | Шень Фей |
+| Heavenly Marks Physique | статура Небесних Знаків |
+| Soul Nurturing Pill | Пігулка Живлення Душі |
+| Soul Concentrating Pill | Пігулка Зосередження Душі |
+| Soul Tempering Pill | Пігулка Гартування Душі |
+| Scarlet Body Enhancing Pill | Багряна Пігулка Зміцнення Тіла |
+| Nine Transformation Pill | Пігулка Дев'яти Перетворень |
+| Dragon Gall Grass | трава Драконової Жовчі |
+| Solani Grass | трава Солані |
 
 ## Russism blacklist (LLM output regularly contains these — always fix)
 

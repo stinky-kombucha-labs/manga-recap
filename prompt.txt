@@ -1,0 +1,16 @@
+Виконай ревю перекладів манги. Працюй до завершення, без запитань і підтверджень.
+
+1. Прочитай .claude/skills/review-batch/SKILL.md і .claude/skills/review-batch/terminology.md — це твоя процедура і канонічна термінологія.
+2. Прочитай config.json → run.chapters і розгорни список розділів.
+3. ОДНИМ python-скриптом (.venv/bin/python) виведи всі блоки з усіх temp/tales-of-demons-and-gods-manga/chapter-*/review_todo.json: розділ, page_num, id, reasons, original, translation.
+4. Виправ переклади за правилами скіла:
+   - редагуй ТІЛЬКИ поле translation у сусідньому translations.json (збіг за page_num + id);
+   - запис — виключно через pipeline.jsonfmt.write (sys.path.insert(0, 'scripts')), не json.dump;
+   - правки застосовуй батчем: один скрипт на багато розділів, не по блоку за раз;
+   - сміттєві лого-блоки в кутах сторінок ("АГРОГОМ", варіанти AC.OO.COM, readmanga) → translation="" та noise=true;
+   - неперекладний одно-слівний SFX → translation="" та keep_empty=true;
+   - звіряй імена/терміни та русизми з terminology.md; нові терміни, які стандартизуєш, допиши туди;
+   - НЕ запускай step1_extract.py / step2_translate.py / step2b_repair.py;
+   - якщо зміст verify-блока неможливо відновити з OCR-тексту і ти не можеш подивитися картинку — НЕ вгадуй, залиш як є і додай у фінальний список.
+5. Після ВСІХ правок запусти .venv/bin/python scripts/step3_render.py, потім scripts/step3b_verify.py --fix; якщо exit-код 3 — ще раз step3_render.py і потім scripts/step3b_verify.py.
+6. Фінальний звіт: по кожному розділу — скільки блоків виправлено/очищено/noise, статус verify; окремим списком — блоки, які не зміг упевнено виправити (розділ/сторінка/id/причина).
